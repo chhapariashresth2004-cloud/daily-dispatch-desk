@@ -1,6 +1,6 @@
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open("dispatch-desk-static-v5").then((cache) =>
+    caches.open("dispatch-desk-static-v6").then((cache) =>
       cache.addAll(["/", "/index.html", "/styles.css", "/app.js", "/manifest.webmanifest", "/dispatch-icon.svg"])
     )
   );
@@ -10,7 +10,7 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== "dispatch-desk-static-v5").map((key) => caches.delete(key)))
+      Promise.all(keys.filter((key) => key !== "dispatch-desk-static-v6").map((key) => caches.delete(key)))
     )
   );
   self.clients.claim();
@@ -23,7 +23,7 @@ self.addEventListener("fetch", (event) => {
     fetch(event.request)
       .then((response) => {
         const copy = response.clone();
-        caches.open("dispatch-desk-static-v5").then((cache) => cache.put(event.request, copy));
+        caches.open("dispatch-desk-static-v6").then((cache) => cache.put(event.request, copy));
         return response;
       })
       .catch(() => caches.match(event.request))

@@ -20,6 +20,7 @@ const state = {
   draftExtractedBillData: {},
   bulkDrafts: [],
   liveRefreshTimer: null,
+  photoUploadBusy: false,
 };
 
 const transportModes = ["", "Transport", "Self", "Delivery Partner", "Bus", "Direct Delivery", "Local Delivery", "Not Required"];
@@ -262,7 +263,7 @@ function myJobs() {
 async function claimJob(jobId) {
   const response = await fetch(`/api/dispatches/${jobId}/claim`, { method: "POST" });
   const data = await response.json();
-  if (!response.ok) return toast(data.error?.includes("2 active") ? "Complete one job first" : data.error, "error");
+  if (!response.ok) return toast(data.error?.includes("2 active") ? "You already have 2 active jobs. Complete one job before taking another." : data.error, "error");
   state.selectedDispatcherJobId = jobId;
   state.dispatcherTab = "my";
   await refresh("Job claimed");
@@ -549,16 +550,19 @@ async function uploadPackingPhotos(fileList) {
   const files = [...(fileList || [])];
   if (!files.length) return;
   setPhotoBusy("packing", true);
-  const saved = await savePacking({ refreshAfter: false });
-  if (!saved) return setPhotoBusy("packing", false);
   let uploaded = 0;
-  for (const file of files) {
-    const optimized = await optimizePhotoForUpload(file);
-    if (await uploadDispatcherPhoto("product-photo", optimized, "Packing photo uploaded", "final-packing", false)) uploaded += 1;
+  try {
+    const saved = await savePacking({ refreshAfter: false });
+    if (!saved) return;
+    for (const file of files) {
+      const optimized = await optimizePhotoForUpload(file);
+      if (await uploadDispatcherPhoto("product-photo", optimized, "Packing photo uploaded", "final-packing", false)) uploaded += 1;
+    }
+  } finally {
+    els.packingCameraInput.value = "";
+    els.packingFileInput.value = "";
+    setPhotoBusy("packing", false);
   }
-  els.packingCameraInput.value = "";
-  els.packingFileInput.value = "";
-  setPhotoBusy("packing", false);
   renderDispatcher();
   if (uploaded) toast("Packing photo uploaded");
 }
@@ -568,13 +572,16 @@ async function uploadGoodsPhotos(fileList) {
   if (!files.length) return;
   setPhotoBusy("goods", true);
   let uploaded = 0;
-  for (const file of files) {
-    const optimized = await optimizePhotoForUpload(file);
-    if (await uploadDispatcherPhoto("product-photo", optimized, "Goods photo uploaded", "goods-check", false)) uploaded += 1;
+  try {
+    for (const file of files) {
+      const optimized = await optimizePhotoForUpload(file);
+      if (await uploadDispatcherPhoto("product-photo", optimized, "Goods photo uploaded", "goods-check", false)) uploaded += 1;
+    }
+  } finally {
+    els.goodsCameraInput.value = "";
+    els.goodsFileInput.value = "";
+    setPhotoBusy("goods", false);
   }
-  els.goodsCameraInput.value = "";
-  els.goodsFileInput.value = "";
-  setPhotoBusy("goods", false);
   renderDispatcher();
   if (uploaded) toast("Goods photo uploaded");
 }
@@ -585,6 +592,7 @@ function openCameraInput(input) {
 }
 
 function setPhotoBusy(kind, busy) {
+  state.photoUploadBusy = busy;
   const isGoods = kind === "goods";
   const label = isGoods ? els.goodsPhotoLabel : els.packingPhotoLabel;
   const cameraButton = isGoods ? els.goodsCameraButton : els.packingCameraButton;
@@ -1581,6 +1589,7 @@ function startLiveRefresh() {
   stopLiveRefresh();
   state.liveRefreshTimer = setInterval(async () => {
     if (document.visibilityState !== "visible" || !state.me) return;
+    if (state.photoUploadBusy) return;
     const focused = document.activeElement;
     const editing = focused && ["INPUT", "TEXTAREA", "SELECT"].includes(focused.tagName);
     const before = state.jobs.map((job) => `${job.id}:${job.updatedAt}`).join("|");
@@ -1675,6 +1684,7 @@ function highlightMissingField(message) {
     "Upload packing photo": els.packingPhotoPreviewGrid,
     "Enter packing breakup": els.bankPackingGrid,
     "Select shortage reason": els.openExceptionDialogButton,
+    "Packed cases do not match bill cases. Please correct the breakup or enter a valid reason.": els.openExceptionDialogButton,
     "Enter delivery partner name": els.deliveryPartnerInput,
     "Select transport mode": els.transportModeInput,
     "Select transport name": els.transportNameInput,

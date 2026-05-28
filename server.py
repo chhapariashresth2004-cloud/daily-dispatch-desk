@@ -25,8 +25,20 @@ from pypdf import PdfReader
 
 
 ROOT = Path(__file__).parent
-DATA_DIR = Path(os.environ.get("DISPATCH_DATA_DIR", ROOT / "data"))
-UPLOAD_DIR = Path(os.environ.get("DISPATCH_UPLOAD_DIR", ROOT / "uploads"))
+
+
+def default_data_dir() -> Path:
+    configured = os.environ.get("DISPATCH_DATA_DIR")
+    if configured:
+        return Path(configured)
+    render_disk = Path("/var/data")
+    if os.environ.get("RENDER") and render_disk.exists():
+        return render_disk
+    return ROOT / "data"
+
+
+DATA_DIR = default_data_dir()
+UPLOAD_DIR = Path(os.environ.get("DISPATCH_UPLOAD_DIR", DATA_DIR / "uploads" if DATA_DIR.name == "data" and str(DATA_DIR).startswith("/var/") else ROOT / "uploads"))
 BILLS_DIR = UPLOAD_DIR / "bills"
 PRODUCT_PHOTOS_DIR = UPLOAD_DIR / "product-photos"
 BILTY_PHOTOS_DIR = UPLOAD_DIR / "bilty-photos"
@@ -1793,7 +1805,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 (user["id"],),
             ).fetchone()[0]
             if active_count >= 2:
-                self.send_json({"error": "You already have 2 active jobs. Finish one before claiming another."}, HTTPStatus.CONFLICT)
+                self.send_json({"error": "You already have 2 active jobs. Complete one job before taking another."}, HTTPStatus.CONFLICT)
                 return
             timestamp = now_iso()
             conn.execute(
@@ -2157,7 +2169,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 return
             totals = packing_totals(breakup)
             if totals["totalPackedCases"] != job["total_cases"] and not job["shortage_reason"]:
-                self.send_json({"error": "Select shortage reason"}, HTTPStatus.BAD_REQUEST)
+                self.send_json({"error": "Packed cases do not match bill cases. Please correct the breakup or enter a valid reason."}, HTTPStatus.BAD_REQUEST)
                 return
             if job["current_status"] not in {"packing", "needs-correction"}:
                 self.send_json({"error": "This job is not ready to submit for review."}, HTTPStatus.CONFLICT)
@@ -2192,6 +2204,30 @@ class DispatchHandler(BaseHTTPRequestHandler):
             if job["current_status"] != "submitted-for-review":
                 self.send_json({"error": "Only jobs submitted for review can be reviewed."}, HTTPStatus.CONFLICT)
                 return
+            packing = conn.execute("SELECT * FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
+            breakup = normalize_packing_lines(load_json(packing["packing_breakup_json"], empty_packing())) if packing else []
+            packing_photo_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM photos
+                WHERE dispatch_job_id = ? AND photo_type IN ('pre-dispatch', 'final-packing')
+                """,
+                (job_id,),
+            ).fetchone()[0]
+            goods_photo_count = conn.execute(
+                "SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type = 'goods-check'",
+                (job_id,),
+            ).fetchone()[0]
+            totals = packing_totals(breakup)
+            if decision == "approve":
+                if not goods_photo_count or (not packing_photo_count and not (packing["product_photo_url"] if packing else "")):
+                    self.send_json({"error": "Cannot approve. Required photos are missing."}, HTTPStatus.BAD_REQUEST)
+                    return
+                if not breakup:
+                    self.send_json({"error": "Cannot approve. Please enter package breakup."}, HTTPStatus.BAD_REQUEST)
+                    return
+                if totals["totalPackedCases"] != int(job["total_cases"] or 0) and not job["shortage_reason"]:
+                    self.send_json({"error": "Cannot approve. Packed cases do not match bill cases."}, HTTPStatus.BAD_REQUEST)
+                    return
             if decision == "approve" and job["correction_count"] > 0 and not note:
                 self.send_json({"error": "Reviewer note is required after a correction was raised."}, HTTPStatus.BAD_REQUEST)
                 return
