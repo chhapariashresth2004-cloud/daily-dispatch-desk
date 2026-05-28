@@ -343,26 +343,52 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, encoded: str) -> bool:
-    salt_b64, digest_b64 = encoded.split("$", 1)
-    salt = base64.b64decode(salt_b64)
-    expected = base64.b64decode(digest_b64)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
-    return secrets.compare_digest(digest, expected)
+    try:
+        salt_b64, digest_b64 = encoded.split("$", 1)
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(digest_b64)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
+        return secrets.compare_digest(digest, expected)
+    except Exception:
+        return False
+
+
+def valid_password_hash(encoded: str | None) -> bool:
+    if not encoded or "$" not in encoded:
+        return False
+    try:
+        salt_b64, digest_b64 = encoded.split("$", 1)
+        base64.b64decode(salt_b64)
+        base64.b64decode(digest_b64)
+        return True
+    except Exception:
+        return False
 
 
 def seed_users(conn: sqlite3.Connection) -> None:
     existing = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    if existing:
-        return
     timestamp = now_iso()
     for user_id, name, login, password, role in DEFAULT_USERS:
-        conn.execute(
-            """
-            INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (user_id, name, login, hash_password(password), role, timestamp, timestamp),
-        )
+        current = conn.execute("SELECT * FROM users WHERE email_or_mobile = ?", (login,)).fetchone()
+        if current:
+            if not valid_password_hash(current["password_hash"]):
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET password_hash = ?, active_status = 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (hash_password(password), timestamp, current["id"]),
+                )
+            continue
+        if not existing:
+            conn.execute(
+                """
+                INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (user_id, name, login, hash_password(password), role, timestamp, timestamp),
+            )
 
 
 def seed_settings(conn: sqlite3.Connection) -> None:
