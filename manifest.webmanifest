@@ -1,0 +1,16 @@
+{
+  "name": "Daily Dispatch Desk",
+  "short_name": "Dispatch Desk",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#246bff",
+  "description": "Internal dispatch workflow app for warehouse teams.",
+  "icons": [
+    {
+      "src": "/dispatch-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

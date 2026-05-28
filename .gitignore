@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local databases and uploaded business files
+data/
+uploads/
+demo-*/
+reset-backup-*/
+qa-screenshots/
+
+# Logs and screenshots
+*.log
+ui-*.png
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+

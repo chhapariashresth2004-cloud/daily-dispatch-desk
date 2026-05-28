@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#246bff" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Dispatch Desk" />
+    <title>Daily Dispatch Desk</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <section id="loginView" class="login-shell">
+      <div class="login-card">
+        <p class="eyebrow">Daily Dispatch Desk</p>
+        <h1>Role-based dispatch workflow</h1>
+        <form id="loginForm" class="stack-form">
+          <label class="field"><span>Login ID</span><input id="loginIdInput" required /></label>
+          <label class="field"><span>Password</span><input id="passwordInput" type="password" required /></label>
+          <button class="primary-button" type="submit">Open Dashboard</button>
+        </form>
+      </div>
+    </section>
+
+    <main id="appShell" class="app-shell hidden">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">Daily Dispatch Desk</p>
+          <h1>Operations</h1>
+        </div>
+        <nav id="roleNav" class="role-nav"></nav>
+        <div class="sidebar-footer">
+          <strong id="currentUserName"></strong>
+          <span id="currentUserRole"></span>
+          <button id="logoutButton" class="secondary-button" type="button">Log out</button>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p id="pageEyebrow" class="eyebrow"></p>
+            <h2 id="pageTitle"></h2>
+          </div>
+          <div class="top-actions">
+            <button id="newDispatchButton" class="primary-button hidden" type="button">New Dispatch</button>
+            <div id="flashMessage" class="flash-message hidden"></div>
+          </div>
+        </header>
+
+        <section id="dispatcherDashboardView" class="page-view hidden">
+          <div id="dispatcherMetrics" class="metric-grid dispatcher-metrics"></div>
+          <div id="dispatcherTabs" class="page-tabs"></div>
+          <div class="split-layout dispatcher-layout">
+            <section class="panel">
+              <div id="dispatcherList" class="card-list"></div>
+            </section>
+            <section class="panel detail-panel">
+              <div class="section-header">
+                <div><p class="eyebrow">Dispatcher workbench</p><h3 id="dispatcherDetailTitle">Select a job</h3></div>
+                <span id="dispatcherDetailStatus" class="status-pill neutral">Waiting</span>
+              </div>
+              <div id="dispatcherEmptyState" class="empty-state">Select work to begin.</div>
+              <div id="dispatcherDetailContent" class="hidden">
+                <div id="dispatcherReadonlyGrid" class="readonly-grid"></div>
+                <section id="goodsCheckSection" class="workflow-step-card">
+                  <div class="section-header compact-header">
+                    <div><p class="eyebrow">Step 1</p><h4>Picked goods photo</h4></div>
+                    <span id="goodsCheckStatusLabel" class="soft-pill">Waiting</span>
+                  </div>
+                  <p class="muted-copy">Take clear photos of the picked goods first. Packing opens as soon as the photo is uploaded.</p>
+                  <section class="upload-card">
+                    <span>Goods Photos</span>
+                    <strong id="goodsPhotoLabel">Upload goods photos</strong>
+                    <div class="button-row photo-action-row">
+                      <button id="goodsCameraButton" type="button" class="secondary-button">Take Photo</button>
+                      <label class="secondary-button file-button">Upload from File<input id="goodsFileInput" type="file" accept="image/*" multiple /></label>
+                    </div>
+                    <input id="goodsCameraInput" class="native-file-input" type="file" accept="image/*" capture="environment" />
+                    <div id="goodsPhotoPreviewGrid" class="photo-preview-grid"></div>
+                  </section>
+                  <button id="submitGoodsReviewButton" type="button" class="primary-button hidden">Submit Goods for Review</button>
+                </section>
+                <form id="packingForm" class="stack-form">
+                  <div class="readonly-grid compact-total-grid">
+                    <div><span>Total Packages</span><strong id="totalPackagesValue">0</strong></div>
+                    <div><span>Total Packed Cases</span><strong id="totalPackedCasesValue">0</strong></div>
+                  </div>
+                  <section>
+                    <div class="section-header compact-header">
+                      <div><p class="eyebrow">Packing & review prep</p><h4>Quick package entry</h4></div>
+                    </div>
+                    <div id="bankPackingGrid" class="bank-packing-grid">
+                      <label class="bank-pack-card">
+                        <span>1 ×</span>
+                        <input id="pack1Input" type="number" min="0" inputmode="numeric" />
+                        <small>1 case packs</small>
+                      </label>
+                      <label class="bank-pack-card">
+                        <span>2 ×</span>
+                        <input id="pack2Input" type="number" min="0" inputmode="numeric" />
+                        <small>2 case packs</small>
+                      </label>
+                      <label class="bank-pack-card">
+                        <span>3 ×</span>
+                        <input id="pack3Input" type="number" min="0" inputmode="numeric" />
+                        <small>3 case packs</small>
+                      </label>
+                      <label class="bank-pack-card">
+                        <span>4 ×</span>
+                        <input id="pack4Input" type="number" min="0" inputmode="numeric" />
+                        <small>4 case packs</small>
+                      </label>
+                      <label class="bank-pack-card">
+                        <span>5 ×</span>
+                        <input id="pack5Input" type="number" min="0" inputmode="numeric" />
+                        <small>5 case packs</small>
+                      </label>
+                      <label class="bank-pack-card bora-card">
+                        <span>Bora</span>
+                        <input id="boraCasesListInput" inputmode="numeric" placeholder="Cases in each bora: 12,17" />
+                        <small>Enter each bora separately</small>
+                      </label>
+                    </div>
+                  </section>
+                  <section id="shortageSection" class="warning-panel hidden">
+                    <div class="section-header compact-header">
+                      <div><p class="eyebrow">Item difference</p><h4>Packed cases do not match order</h4></div>
+                    </div>
+                    <div class="button-row compact-action-row">
+                      <button id="openExceptionDialogButton" type="button" class="warning-button">Add Item Difference</button>
+                    </div>
+                    <div id="exceptionSummaryList" class="exception-summary-list"></div>
+                    <label class="field"><span>Overall Note</span><textarea id="shortageNoteInput" rows="2"></textarea></label>
+                    <div id="shortageItemsWrap" class="hidden">
+                      <label class="field"><span>Search bill item</span><input id="shortageItemSearchInput" placeholder="Search product" /></label>
+                      <div id="shortageBillItems" class="shortage-item-list"></div>
+                      <div id="shortageSelectedItems" class="shortage-selected-list"></div>
+                    </div>
+                  </section>
+                  <label class="field"><span>Dispatcher Note</span><textarea id="dispatcherNoteInput" rows="2"></textarea></label>
+                  <div class="button-row">
+                    <button id="unassignJobButton" type="button" class="secondary-button hidden">Unassign</button>
+                    <button id="submitReviewButton" type="button" class="primary-button">Submit for Review</button>
+                  </div>
+                </form>
+                <div id="packingProofWrap" class="proof-grid single-proof-grid top-gap">
+                  <section class="upload-card">
+                    <span>Packing Photo</span>
+                    <strong id="packingPhotoLabel">Upload packing photos</strong>
+                    <div class="button-row photo-action-row">
+                      <button id="packingCameraButton" type="button" class="secondary-button">Take Photo</button>
+                      <label class="secondary-button file-button">Upload from File<input id="packingFileInput" type="file" accept="image/*" multiple /></label>
+                    </div>
+                    <input id="packingCameraInput" class="native-file-input" type="file" accept="image/*" capture="environment" />
+                    <div id="packingPhotoPreviewGrid" class="photo-preview-grid"></div>
+                  </section>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="reviewerDashboardView" class="page-view hidden">
+          <div id="reviewerMetrics" class="metric-grid reviewer-metrics"></div>
+          <div class="toolbar-row reviewer-toolbar">
+            <label class="field search-field"><span>Search dispatch</span><input id="reviewerSearchInput" placeholder="Party, city, item, issue..." /></label>
+            <button id="bulkImportButton" class="secondary-button" type="button">Bulk Import Bills</button>
+          </div>
+          <div id="reviewerTabs" class="page-tabs"></div>
+          <div class="reviewer-board">
+            <section class="panel">
+              <div id="reviewerList" class="responsive-table-wrap"></div>
+            </section>
+            <section id="reviewerDetailPanel" class="panel detail-panel hidden">
+              <div class="reviewer-three-col">
+                <div>
+                  <p class="eyebrow">Bill details</p>
+                  <h3 id="reviewerDetailTitle"></h3>
+                  <div id="reviewerBillGrid" class="readonly-grid single-column-grid"></div>
+                  <div id="reviewerBillItems" class="bill-item-list"></div>
+                  <div id="reviewerBillLink"></div>
+                </div>
+                <div>
+                  <p class="eyebrow">Goods proof</p>
+                  <div id="reviewerGoodsGrid" class="readonly-grid single-column-grid"></div>
+                  <div class="proof-links">
+                    <div id="reviewerGoodsPhotoLink"></div>
+                  </div>
+                </div>
+                <div>
+                  <p class="eyebrow">Packing proof</p>
+                  <div id="reviewerPackingGrid" class="readonly-grid single-column-grid"></div>
+                  <div id="reviewerPackingTable" class="packing-review-table"></div>
+                  <div id="reviewerShortageBlock" class="warning-panel hidden"></div>
+                  <div class="proof-links">
+                    <div id="reviewerPackingPhotoLink"></div>
+                  </div>
+                </div>
+                <div>
+                  <p class="eyebrow">Reviewer action</p>
+                  <form id="goodsReviewDecisionForm" class="stack-form hidden">
+                    <label class="field"><span>Reviewer Note</span><textarea id="goodsReviewerNoteInput" rows="2"></textarea></label>
+                    <div class="button-row">
+                      <button data-goods-review-action="correction" type="button" class="warning-button">Send Back Goods</button>
+                      <button data-goods-review-action="cancel" type="button" class="danger-button">Cancel</button>
+                      <button data-goods-review-action="approve" type="button" class="primary-button">Approve Goods</button>
+                    </div>
+                  </form>
+                  <form id="reviewDecisionForm" class="stack-form">
+                    <label class="field"><span>Reviewer Note</span><textarea id="reviewerNoteInput" rows="2"></textarea></label>
+                    <div class="button-row">
+                      <button data-review-action="correction" type="button" class="warning-button">Send Back</button>
+                      <button data-review-action="cancel" type="button" class="danger-button">Cancel</button>
+                      <button data-review-action="approve" type="button" class="primary-button">Approve Packing</button>
+                    </div>
+                  </form>
+                  <div id="reviewApprovedBanner" class="success-banner hidden">
+                    Packing approved. Continue with dispatch steps.
+                  </div>
+                  <form id="reviewerDispatchForm" class="stack-form top-gap">
+                    <label class="field"><span>Delivery Partner</span><input id="deliveryPartnerInput" list="deliveryPartnerDirectory" /></label>
+                    <label class="field"><span>Transport Mode</span><select id="transportModeInput"></select></label>
+                    <label class="field"><span>Transport Name</span><input id="transportNameInput" /></label>
+                    <label class="field"><span>Route</span><input id="deliveryRouteInput" readonly /></label>
+                    <div class="button-row">
+                      <button id="markDispatchedButton" type="button" class="primary-button">Mark Sent to Dispatch</button>
+                    </div>
+                  </form>
+                  <form id="reviewerCompletionForm" class="stack-form top-gap hidden">
+                    <label class="field"><span>Bilty Package Count</span><input id="biltyPackageCountInput" type="number" min="0" /></label>
+                    <label class="field"><span>Freight Amount</span><input id="freightAmountInput" type="number" min="0" step="0.01" /></label>
+                    <label class="field"><span>Optional Reference</span><input id="optionalReferenceInput" /></label>
+                    <label class="upload-card">
+                      <span>Bilty Photo</span>
+                      <strong id="biltyPhotoLabel">Upload bilty photo</strong>
+                      <input id="biltyPhotoInput" type="file" accept="image/*,.pdf" />
+                    </label>
+                    <div id="packageDiffBlock" class="warning-panel hidden">
+                      <strong id="packageDiffText"></strong>
+                      <label class="field top-gap"><span>Difference Reason</span><select id="packageDifferenceReasonInput"></select></label>
+                      <label class="field"><span>Difference Note</span><textarea id="packageDifferenceNoteInput" rows="2"></textarea></label>
+                    </div>
+                    <div class="button-row">
+                      <button id="markCompletedButton" type="button" class="success-button">Mark Completed</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </section>
+          </div>
+          <section id="reviewerActivityPanel" class="panel hidden">
+            <div id="reviewerActivityLog" class="timeline"></div>
+          </section>
+        </section>
+
+        <section id="adminDashboardView" class="page-view hidden">
+          <div id="adminMetrics" class="metric-grid admin-metrics"></div>
+          <div class="toolbar-row admin-toolbar">
+            <label class="field search-field"><span>Search dispatch</span><input id="adminSearchInput" placeholder="Party, city, item, issue..." /></label>
+          </div>
+          <div id="adminTabs" class="page-tabs"></div>
+          <section id="adminOverviewPanel" class="panel"></section>
+          <section id="adminJobsPanel" class="panel hidden">
+            <div class="split-layout admin-jobs-layout">
+              <div id="adminJobsTable" class="responsive-table-wrap"></div>
+              <form id="adminEditForm" class="stack-form">
+                <div class="section-header"><div><p class="eyebrow">Edit record</p><h3 id="adminEditTitle">Select a job</h3></div></div>
+                <label class="field"><span>Party Name</span><input id="adminPartyInput" /></label>
+                <label class="field"><span>Party City</span><input id="adminCityInput" /></label>
+                <label class="field"><span>Order Cases</span><input id="adminCasesInput" type="number" min="0" /></label>
+                <label class="field"><span>Dispatcher</span><select id="adminDispatcherInput"></select></label>
+                <label class="field"><span>Status</span><select id="adminStatusInput"></select></label>
+                <div id="adminTimingGrid" class="readonly-grid single-column-grid"></div>
+                <button class="primary-button" type="submit">Save Edit</button>
+              </form>
+            </div>
+          </section>
+          <section id="adminRoutesPanel" class="panel hidden">
+            <div class="form-grid">
+              <form id="routeConfigList" class="stack-form"></form>
+              <form id="routeBatchForm" class="stack-form">
+                <label class="field"><span>Route Name</span><select id="routeBatchRouteInput"></select></label>
+                <label class="field"><span>Delivery Partner</span><input id="routeBatchPartnerInput" /></label>
+                <label class="field"><span>Job IDs / invoices</span><textarea id="routeBatchJobsInput" rows="3" placeholder="A001, A002"></textarea></label>
+                <button class="primary-button" type="submit">Create Route Batch</button>
+              </form>
+            </div>
+            <div id="routeBatchList" class="report-grid top-gap"></div>
+          </section>
+          <section id="adminUsersPanel" class="panel hidden"><div id="userManagementList" class="user-list"></div></section>
+          <section id="adminReportsPanel" class="panel hidden"><div id="adminReports" class="report-grid"></div></section>
+          <section id="adminActivityPanel" class="panel hidden"><div id="adminActivityLog" class="timeline"></div></section>
+          <section id="adminSettingsPanel" class="panel hidden">
+            <div class="report-grid">
+              <article class="report-card"><h4>Future AI settings</h4><p class="muted-copy">Hidden for now. Reserved for Phase 2.</p></article>
+              <article class="report-card"><h4>Future WhatsApp settings</h4><p class="muted-copy">Hidden for now. Reserved for Phase 2.</p></article>
+              <article class="report-card">
+                <h4>Delivery Partner Directory</h4>
+                <p class="muted-copy">Names learn automatically when reviewers save them.</p>
+                <form id="deliveryPartnerDirectoryForm" class="button-row directory-form">
+                  <input id="deliveryPartnerDirectoryInput" placeholder="Add delivery partner" />
+                  <button class="secondary-button" type="submit">Add</button>
+                </form>
+                <div id="deliveryPartnerDirectoryAdmin" class="directory-list"></div>
+              </article>
+              <article class="report-card">
+                <h4>Role Titles</h4>
+                <form id="roleLabelForm" class="stack-form">
+                  <label class="field"><span>Dispatcher title</span><input id="dispatcherRoleLabelInput" /></label>
+                  <label class="field"><span>Reviewer title</span><input id="reviewerRoleLabelInput" /></label>
+                  <button class="secondary-button" type="submit">Save Titles</button>
+                </form>
+              </article>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="newDispatchDialog" class="dialog-card">
+      <form id="createJobForm" class="stack-form">
+        <div class="section-header"><h3>New Dispatch</h3><button id="closeNewDispatchButton" type="button" class="secondary-button">Close</button></div>
+        <label class="upload-card">
+          <span>Bill PDF</span>
+          <strong id="billUploadLabel">Upload bill PDF</strong>
+          <input id="billFileInput" type="file" accept=".pdf" />
+        </label>
+        <div class="form-grid">
+          <label class="field"><span>Dispatch Date</span><input id="draftDispatchDateInput" type="date" /></label>
+          <label class="field"><span>Route</span><select id="draftRouteInput" required></select></label>
+          <label class="field"><span>Party Name</span><input id="draftPartyInput" required /></label>
+          <label class="field"><span>Party City</span><input id="draftCityInput" required /></label>
+          <label class="field"><span>Party Mobile</span><input id="draftMobileInput" /></label>
+          <label class="field"><span>Invoice Date</span><input id="draftInvoiceDateInput" type="date" /></label>
+          <label class="field"><span>Order Case Count</span><input id="draftOrderCasesInput" type="number" min="0" required /></label>
+          <label class="field"><span>Invoice Amount</span><input id="draftAmountInput" type="number" min="0" step="0.01" /></label>
+        </div>
+        <div class="button-row">
+          <button id="clearDraftButton" type="button" class="secondary-button">Clear</button>
+          <button type="submit" class="primary-button">Create Open Job</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="bulkImportDialog" class="dialog-card wide-dialog">
+      <form id="bulkImportForm" class="stack-form">
+        <div class="section-header">
+          <div><p class="eyebrow">Reviewer intake</p><h3>Bulk Import Bills</h3></div>
+          <button id="closeBulkImportButton" type="button" class="secondary-button">Close</button>
+        </div>
+        <label class="upload-card">
+          <span>Bill PDFs</span>
+          <strong id="bulkBillUploadLabel">Choose multiple bill PDFs</strong>
+          <input id="bulkBillFilesInput" type="file" accept=".pdf" multiple />
+        </label>
+        <div id="bulkImportRows" class="bulk-import-list"></div>
+        <div class="button-row">
+          <button type="submit" class="primary-button">Create Open Jobs</button>
+        </div>
+      </form>
+    </dialog>
+
+    <datalist id="deliveryPartnerDirectory"></datalist>
+
+    <dialog id="itemExceptionDialog" class="dialog-card compact-dialog">
+      <form id="itemExceptionForm" class="stack-form">
+        <div class="section-header">
+          <div><p class="eyebrow">Item difference</p><h3>Add exception</h3></div>
+          <button id="closeExceptionDialogButton" type="button" class="secondary-button">Close</button>
+        </div>
+        <label class="field"><span>Search Bill Item</span><input id="exceptionItemSearchInput" placeholder="Search billed product" /></label>
+        <label class="field"><span>Select Item</span><select id="exceptionItemSelect"></select></label>
+        <div class="form-grid">
+          <label class="field"><span>Exception Type</span><select id="exceptionTypeInput">
+            <option value="short">Short quantity</option>
+            <option value="extra">Extra quantity</option>
+            <option value="mrp_mismatch">MRP mismatch</option>
+            <option value="substitute">Substitute item</option>
+          </select></label>
+          <label class="field"><span>Reason</span><select id="exceptionReasonInput"></select></label>
+          <label class="field"><span>Billed Qty</span><input id="exceptionBilledQtyInput" type="number" min="0" /></label>
+          <label class="field"><span>Actual Qty</span><input id="exceptionActualQtyInput" type="number" min="0" /></label>
+          <label class="field"><span>Billed MRP</span><input id="exceptionBilledMrpInput" type="number" min="0" /></label>
+          <label class="field"><span>Actual MRP</span><input id="exceptionActualMrpInput" type="number" min="0" /></label>
+        </div>
+        <label class="field"><span>Note</span><textarea id="exceptionNoteInput" rows="2"></textarea></label>
+        <div class="button-row">
+          <button type="submit" class="primary-button">Add Difference</button>
+        </div>
+      </form>
+    </dialog>
+
+    <template id="metricCardTemplate"><article class="metric-card"><span data-field="label"></span><strong data-field="value"></strong></article></template>
+    <template id="jobCardTemplate"><button class="job-card" type="button"><div><strong data-field="party"></strong><span data-field="meta"></span></div><em data-field="status" class="status-pill neutral"></em></button></template>
+    <script src="app.js"></script>
+  </body>
+</html>

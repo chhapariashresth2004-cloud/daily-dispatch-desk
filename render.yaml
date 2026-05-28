@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: daily-dispatch-desk
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: DISPATCH_DATA_DIR
+        value: /var/data
+      - key: DISPATCH_UPLOAD_DIR
+        value: /var/data/uploads
+      - key: DISPATCH_DB_PATH
+        value: /var/data/dispatches.db
+    disk:
+      name: dispatch-data
+      mountPath: /var/data
+      sizeGB: 5
