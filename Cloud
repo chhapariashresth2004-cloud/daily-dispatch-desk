@@ -1,0 +1,14 @@
+.gitignore
+app.js
+CLOUD_DEPLOYMENT.md
+dispatch-icon.svg
+index.html
+manifest.webmanifest
+Procfile
+README.md
+render.yaml
+requirements.txt
+runtime.txt
+server.py
+styles.css
+sw.js
