@@ -366,29 +366,35 @@ def valid_password_hash(encoded: str | None) -> bool:
 
 
 def seed_users(conn: sqlite3.Connection) -> None:
-    existing = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     timestamp = now_iso()
     for user_id, name, login, password, role in DEFAULT_USERS:
-        current = conn.execute("SELECT * FROM users WHERE email_or_mobile = ?", (login,)).fetchone()
+        current = conn.execute(
+            "SELECT * FROM users WHERE email_or_mobile = ? OR id = ?",
+            (login, user_id),
+        ).fetchone()
         if current:
+            updates = {
+                "name": current["name"] or name,
+                "email_or_mobile": current["email_or_mobile"] or login,
+                "role": current["role"] if current["role"] in {"reviewer", "dispatcher", "admin"} else role,
+                "active_status": 1,
+                "updated_at": timestamp,
+            }
             if not valid_password_hash(current["password_hash"]):
-                conn.execute(
-                    """
-                    UPDATE users
-                    SET password_hash = ?, active_status = 1, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (hash_password(password), timestamp, current["id"]),
-                )
-            continue
-        if not existing:
+                updates["password_hash"] = hash_password(password)
+            set_sql = ", ".join(f"{key} = ?" for key in updates)
             conn.execute(
-                """
-                INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (user_id, name, login, hash_password(password), role, timestamp, timestamp),
+                f"UPDATE users SET {set_sql} WHERE id = ?",
+                [*updates.values(), current["id"]],
             )
+            continue
+        conn.execute(
+            """
+            INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            (user_id, name, login, hash_password(password), role, timestamp, timestamp),
+        )
 
 
 def seed_settings(conn: sqlite3.Connection) -> None:
@@ -404,6 +410,10 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
     for column, ddl in {
+        "name": "TEXT",
+        "email_or_mobile": "TEXT",
+        "password_hash": "TEXT",
+        "role": "TEXT",
         "active_status": "INTEGER NOT NULL DEFAULT 1",
         "created_at": "TEXT",
         "updated_at": "TEXT",
