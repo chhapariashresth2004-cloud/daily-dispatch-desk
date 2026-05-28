@@ -68,6 +68,13 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def upload_url_to_path(file_url: str) -> Path:
+    clean = (file_url or "").split("?", 1)[0]
+    if clean.startswith("/uploads/"):
+        return UPLOAD_DIR / clean.removeprefix("/uploads/")
+    return ROOT / clean.lstrip("/")
+
+
 def ensure_storage() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     BILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1405,7 +1412,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
             self.handle_api_get(parsed)
             return
         if parsed.path.startswith("/uploads/"):
-            self.serve_file(ROOT / parsed.path.lstrip("/"))
+            self.serve_file(upload_url_to_path(parsed.path))
             return
         if parsed.path == "/":
             self.serve_file(ROOT / "index.html")
@@ -1607,6 +1614,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
         payload = {
             "ok": True,
             "dataDir": str(DATA_DIR),
+            "uploadDir": str(UPLOAD_DIR),
             "dbPath": str(DB_PATH),
             "dbExists": DB_PATH.exists(),
             "uploadDirExists": UPLOAD_DIR.exists(),
@@ -2735,7 +2743,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for row in rows:
-                bill_path = ROOT / row["bill_file_url"].lstrip("/")
+                bill_path = upload_url_to_path(row["bill_file_url"])
                 if not bill_path.exists():
                     continue
                 safe_party = re.sub(r"[^A-Za-z0-9_-]+", "_", row["party_name"]).strip("_")
