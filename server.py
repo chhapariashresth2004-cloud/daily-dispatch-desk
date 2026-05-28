@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -376,6 +377,28 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -
 
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
+    for column, ddl in {
+        "active_status": "INTEGER NOT NULL DEFAULT 1",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }.items():
+        ensure_column(conn, "users", column, ddl)
+    timestamp = now_iso()
+    conn.execute("UPDATE users SET active_status = 1 WHERE active_status IS NULL")
+    conn.execute("UPDATE users SET created_at = ? WHERE created_at IS NULL OR created_at = ''", (timestamp,))
+    conn.execute("UPDATE users SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''", (timestamp,))
+
+    for column, ddl in {
+        "preferred_transport_name": "TEXT",
+        "active_status": "INTEGER NOT NULL DEFAULT 1",
+        "created_at": "TEXT",
+        "updated_at": "TEXT",
+    }.items():
+        ensure_column(conn, "delivery_partners", column, ddl)
+    conn.execute("UPDATE delivery_partners SET active_status = 1 WHERE active_status IS NULL")
+    conn.execute("UPDATE delivery_partners SET created_at = ? WHERE created_at IS NULL OR created_at = ''", (timestamp,))
+    conn.execute("UPDATE delivery_partners SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''", (timestamp,))
+
     for column, ddl in {
         "daily_entry_no": "INTEGER",
         "dispatch_date": "TEXT",
@@ -1378,6 +1401,9 @@ class DispatchHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/users":
             self.require_roles(user, {"admin"}) and self.handle_create_user()
+            return
+        if parsed.path == "/api/admin/backup/import":
+            self.require_roles(user, {"admin"}) and self.handle_backup_import(user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/claim", parsed.path):
             self.require_roles(user, {"dispatcher"}) and self.handle_claim_dispatch(user, match.group(1))
@@ -2490,6 +2516,74 @@ class DispatchHandler(BaseHTTPRequestHandler):
             )
             user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
             self.send_json(serialize_user(user), HTTPStatus.CREATED)
+
+    def handle_backup_import(self, user: sqlite3.Row) -> None:
+        form = self.parse_multipart()
+        upload = form["file"] if "file" in form else None
+        if upload is None or not getattr(upload, "filename", ""):
+            self.send_json({"error": "Backup ZIP file is required."}, HTTPStatus.BAD_REQUEST)
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        backup_dir = DATA_DIR / f"pre-import-backup-{timestamp}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        if DB_PATH.exists():
+            shutil.copy2(DB_PATH, backup_dir / "dispatches.db")
+        if UPLOAD_DIR.exists():
+            shutil.copytree(UPLOAD_DIR, backup_dir / "uploads", dirs_exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            zip_path = temp_dir / "import.zip"
+            with zip_path.open("wb") as target:
+                shutil.copyfileobj(upload.file, target)
+
+            try:
+                with zipfile.ZipFile(zip_path) as archive:
+                    for member in archive.infolist():
+                        member_path = Path(member.filename)
+                        if member_path.is_absolute() or ".." in member_path.parts:
+                            self.send_json({"error": "Invalid backup ZIP."}, HTTPStatus.BAD_REQUEST)
+                            return
+                    archive.extractall(temp_dir / "extracted")
+            except zipfile.BadZipFile:
+                self.send_json({"error": "Invalid backup ZIP."}, HTTPStatus.BAD_REQUEST)
+                return
+
+            extracted = temp_dir / "extracted"
+            source_db = extracted / "dispatches.db"
+            source_uploads = extracted / "uploads"
+            if not source_db.exists():
+                self.send_json({"error": "Backup must contain dispatches.db."}, HTTPStatus.BAD_REQUEST)
+                return
+
+            with sqlite3.connect(source_db) as check_conn:
+                tables = {row[0] for row in check_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if "dispatch_jobs" not in tables or "users" not in tables:
+                    self.send_json({"error": "Backup database is not a Dispatch Desk database."}, HTTPStatus.BAD_REQUEST)
+                    return
+
+            shutil.copy2(source_db, DB_PATH)
+            if source_uploads.exists():
+                shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+                shutil.copytree(source_uploads, UPLOAD_DIR)
+
+        ensure_storage()
+        with db_connect() as conn:
+            log_action(
+                conn,
+                None,
+                user,
+                "backup_imported",
+                None,
+                None,
+                remarks=f"Imported cloud migration backup. Previous data backed up at {backup_dir.name}.",
+            )
+            job_count = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0]
+            photo_count = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
+        self.send_json({"ok": True, "jobs": job_count, "photos": photo_count, "backupFolder": backup_dir.name})
 
     def handle_update_settings(self) -> None:
         payload = self.read_json()
