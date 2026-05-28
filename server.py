@@ -1632,6 +1632,15 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 ] if "users" in tables else []
                 payload["users"] = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] if "users" in tables else 0
                 payload["jobs"] = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0] if "dispatch_jobs" in tables else 0
+                payload["uploadFiles"] = sum(1 for item in UPLOAD_DIR.rglob("*") if item.is_file()) if UPLOAD_DIR.exists() else 0
+                sample_bill = conn.execute(
+                    "SELECT bill_file_url FROM dispatch_jobs WHERE bill_file_url IS NOT NULL AND bill_file_url != '' LIMIT 1"
+                ).fetchone() if "dispatch_jobs" in tables else None
+                if sample_bill:
+                    sample_path = upload_url_to_path(sample_bill["bill_file_url"])
+                    payload["sampleBillUrl"] = sample_bill["bill_file_url"]
+                    payload["sampleBillPath"] = str(sample_path)
+                    payload["sampleBillExists"] = sample_path.exists()
         except Exception as exc:
             payload.update({"ok": False, "errorType": type(exc).__name__, "detail": str(exc)})
         self.send_json(payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -2626,7 +2635,8 @@ class DispatchHandler(BaseHTTPRequestHandler):
 
             try:
                 with zipfile.ZipFile(zip_path) as archive:
-                    for member in archive.infolist():
+                    members = archive.infolist()
+                    for member in members:
                         member_path = Path(member.filename)
                         if member_path.is_absolute() or ".." in member_path.parts:
                             self.send_json({"error": "Invalid backup ZIP."}, HTTPStatus.BAD_REQUEST)
@@ -2650,9 +2660,23 @@ class DispatchHandler(BaseHTTPRequestHandler):
                     return
 
             shutil.copy2(source_db, DB_PATH)
+            shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            copied_files = 0
             if source_uploads.exists():
-                shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-                shutil.copytree(source_uploads, UPLOAD_DIR)
+                shutil.copytree(source_uploads, UPLOAD_DIR, dirs_exist_ok=True)
+                copied_files = sum(1 for item in UPLOAD_DIR.rglob("*") if item.is_file())
+            if copied_files == 0:
+                with zipfile.ZipFile(zip_path) as archive:
+                    for member in archive.infolist():
+                        if member.is_dir() or not member.filename.startswith("uploads/"):
+                            continue
+                        relative = Path(member.filename).relative_to("uploads")
+                        target = UPLOAD_DIR / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with archive.open(member) as source, target.open("wb") as destination:
+                            shutil.copyfileobj(source, destination)
+                        copied_files += 1
 
         ensure_storage()
         with db_connect() as conn:
@@ -2667,7 +2691,8 @@ class DispatchHandler(BaseHTTPRequestHandler):
             )
             job_count = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0]
             photo_count = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
-        self.send_json({"ok": True, "jobs": job_count, "photos": photo_count, "backupFolder": backup_dir.name})
+        file_count = sum(1 for item in UPLOAD_DIR.rglob("*") if item.is_file()) if UPLOAD_DIR.exists() else 0
+        self.send_json({"ok": True, "jobs": job_count, "photos": photo_count, "files": file_count, "backupFolder": backup_dir.name})
 
     def handle_update_settings(self) -> None:
         payload = self.read_json()
