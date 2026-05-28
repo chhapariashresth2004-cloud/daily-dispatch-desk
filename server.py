@@ -1398,6 +1398,9 @@ class DispatchHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/health":
+            self.handle_health()
+            return
         if parsed.path.startswith("/api/"):
             self.handle_api_get(parsed)
             return
@@ -1560,33 +1563,70 @@ class DispatchHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def handle_login(self) -> None:
-        payload = self.read_json()
-        login = payload.get("login", "").strip()
-        password = payload.get("password", "")
-        with db_connect() as conn:
-            user = conn.execute(
-                "SELECT * FROM users WHERE email_or_mobile = ? AND active_status = 1",
-                (login,),
-            ).fetchone()
-            if not user or not verify_password(password, user["password_hash"]):
-                self.send_json({"error": "Invalid login or password."}, HTTPStatus.UNAUTHORIZED)
-                return
-            token = secrets.token_urlsafe(32)
-            expires_at = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
-            conn.execute(
-                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-                (token, user["id"], now_iso(), expires_at),
+        try:
+            payload = self.read_json()
+            login = payload.get("login", "").strip()
+            password = payload.get("password", "")
+            ensure_storage()
+            with db_connect() as conn:
+                user = conn.execute(
+                    "SELECT * FROM users WHERE email_or_mobile = ? AND active_status = 1",
+                    (login,),
+                ).fetchone()
+                if not user or not verify_password(password, user["password_hash"]):
+                    self.send_json({"error": "Invalid login or password."}, HTTPStatus.UNAUTHORIZED)
+                    return
+                token = secrets.token_urlsafe(32)
+                expires_at = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
+                conn.execute(
+                    "INSERT INTO auth_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                    (token, user["id"], now_iso(), expires_at),
+                )
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header(
+                    "Set-Cookie",
+                    f"dispatch_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_DAYS * 86400}",
+                )
+                data = json.dumps({"user": serialize_user(user)}).encode("utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+        except Exception as exc:
+            print(f"LOGIN_ERROR {type(exc).__name__}: {exc}", flush=True)
+            self.send_json(
+                {
+                    "error": "Login server error.",
+                    "errorType": type(exc).__name__,
+                    "detail": str(exc),
+                },
+                HTTPStatus.INTERNAL_SERVER_ERROR,
             )
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header(
-                "Set-Cookie",
-                f"dispatch_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_DAYS * 86400}",
-            )
-            data = json.dumps({"user": serialize_user(user)}).encode("utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+
+    def handle_health(self) -> None:
+        payload = {
+            "ok": True,
+            "dataDir": str(DATA_DIR),
+            "dbPath": str(DB_PATH),
+            "dbExists": DB_PATH.exists(),
+            "uploadDirExists": UPLOAD_DIR.exists(),
+        }
+        try:
+            ensure_storage()
+            with db_connect() as conn:
+                tables = {
+                    row[0]
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                }
+                payload["tables"] = sorted(tables)
+                payload["userColumns"] = [
+                    row["name"] for row in conn.execute("PRAGMA table_info(users)")
+                ] if "users" in tables else []
+                payload["users"] = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] if "users" in tables else 0
+                payload["jobs"] = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0] if "dispatch_jobs" in tables else 0
+        except Exception as exc:
+            payload.update({"ok": False, "errorType": type(exc).__name__, "detail": str(exc)})
+        self.send_json(payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def handle_logout(self) -> None:
         cookie = SimpleCookie(self.headers.get("Cookie", ""))
