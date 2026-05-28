@@ -87,6 +87,18 @@ def upload_url_to_path(file_url: str) -> Path:
     return ROOT / clean.lstrip("/")
 
 
+def upload_member_relative_path(member_name: str) -> Path | None:
+    clean = member_name.replace("\\", "/").lstrip("/")
+    parts = [part for part in clean.split("/") if part]
+    if "uploads" not in parts:
+        return None
+    upload_index = parts.index("uploads")
+    relative_parts = parts[upload_index + 1 :]
+    if not relative_parts:
+        return None
+    return Path(*relative_parts)
+
+
 def ensure_storage() -> None:
     DATA_DIR.mkdir(exist_ok=True)
     BILLS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2699,20 +2711,33 @@ class DispatchHandler(BaseHTTPRequestHandler):
             shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
             UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
             copied_files = 0
+            copied_examples: list[str] = []
             if source_uploads.exists():
-                shutil.copytree(source_uploads, UPLOAD_DIR, dirs_exist_ok=True)
-                copied_files = sum(1 for item in UPLOAD_DIR.rglob("*") if item.is_file())
+                for source_file in source_uploads.rglob("*"):
+                    if not source_file.is_file():
+                        continue
+                    relative = source_file.relative_to(source_uploads)
+                    target = UPLOAD_DIR / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_file, target)
+                    copied_files += 1
+                    if len(copied_examples) < 5:
+                        copied_examples.append(str(relative).replace("\\", "/"))
             if copied_files == 0:
                 with zipfile.ZipFile(zip_path) as archive:
                     for member in archive.infolist():
-                        if member.is_dir() or not member.filename.startswith("uploads/"):
+                        if member.is_dir():
                             continue
-                        relative = Path(member.filename).relative_to("uploads")
+                        relative = upload_member_relative_path(member.filename)
+                        if relative is None:
+                            continue
                         target = UPLOAD_DIR / relative
                         target.parent.mkdir(parents=True, exist_ok=True)
                         with archive.open(member) as source, target.open("wb") as destination:
                             shutil.copyfileobj(source, destination)
                         copied_files += 1
+                        if len(copied_examples) < 5:
+                            copied_examples.append(str(relative).replace("\\", "/"))
 
         ensure_storage()
         with db_connect() as conn:
@@ -2728,7 +2753,15 @@ class DispatchHandler(BaseHTTPRequestHandler):
             job_count = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0]
             photo_count = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
         file_count = sum(1 for item in UPLOAD_DIR.rglob("*") if item.is_file()) if UPLOAD_DIR.exists() else 0
-        self.send_json({"ok": True, "jobs": job_count, "photos": photo_count, "files": file_count, "backupFolder": backup_dir.name})
+        self.send_json({
+            "ok": True,
+            "jobs": job_count,
+            "photos": photo_count,
+            "files": file_count,
+            "copiedFiles": copied_files,
+            "copiedExamples": copied_examples,
+            "backupFolder": backup_dir.name,
+        })
 
     def handle_update_settings(self) -> None:
         payload = self.read_json()
