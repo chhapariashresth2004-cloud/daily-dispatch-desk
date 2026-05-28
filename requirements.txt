@@ -1,1 +1,2 @@
 pypdf==5.5.0
+legacy-cgi

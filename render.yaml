@@ -6,6 +6,8 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: DISPATCH_DATA_DIR
         value: /var/data
       - key: DISPATCH_UPLOAD_DIR
