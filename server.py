@@ -27,23 +27,61 @@ from pypdf import PdfReader
 ROOT = Path(__file__).parent
 
 
+def directory_is_usable(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".write-test-{uuid.uuid4().hex}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def first_usable_dir(*paths: Path) -> Path:
+    for path in paths:
+        if directory_is_usable(path):
+            return path
+    fallback = Path(tempfile.gettempdir()) / "daily-dispatch-desk-data"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
 def default_data_dir() -> Path:
     configured = os.environ.get("DISPATCH_DATA_DIR")
-    if configured:
+    if configured and directory_is_usable(Path(configured)):
         return Path(configured)
     render_disk = Path("/var/data")
-    if os.environ.get("RENDER") and render_disk.exists():
+    if os.environ.get("RENDER") and directory_is_usable(render_disk):
         return render_disk
-    return ROOT / "data"
+    return first_usable_dir(ROOT / "data", Path(tempfile.gettempdir()) / "daily-dispatch-desk-data")
 
 
 DATA_DIR = default_data_dir()
-UPLOAD_DIR = Path(os.environ.get("DISPATCH_UPLOAD_DIR", DATA_DIR / "uploads" if DATA_DIR.name == "data" and str(DATA_DIR).startswith("/var/") else ROOT / "uploads"))
+
+
+def default_upload_dir() -> Path:
+    configured = os.environ.get("DISPATCH_UPLOAD_DIR")
+    if configured and directory_is_usable(Path(configured)):
+        return Path(configured)
+    return first_usable_dir(DATA_DIR / "uploads", ROOT / "uploads", Path(tempfile.gettempdir()) / "daily-dispatch-desk-uploads")
+
+
+def default_db_path() -> Path:
+    configured = os.environ.get("DISPATCH_DB_PATH")
+    if configured:
+        configured_path = Path(configured)
+        if directory_is_usable(configured_path.parent):
+            return configured_path
+    return DATA_DIR / "dispatches.db"
+
+
+UPLOAD_DIR = default_upload_dir()
 BILLS_DIR = UPLOAD_DIR / "bills"
 PRODUCT_PHOTOS_DIR = UPLOAD_DIR / "product-photos"
 BILTY_PHOTOS_DIR = UPLOAD_DIR / "bilty-photos"
 LEGACY_JSON_PATH = DATA_DIR / "dispatches.json"
-DB_PATH = Path(os.environ.get("DISPATCH_DB_PATH", DATA_DIR / "dispatches.db"))
+DB_PATH = default_db_path()
 PORT = int(os.environ.get("DISPATCH_PORT", os.environ.get("PORT", "8000")))
 SESSION_DAYS = 7
 
@@ -99,11 +137,30 @@ def upload_member_relative_path(member_name: str) -> Path | None:
     return Path(*relative_parts)
 
 
+def switch_to_ephemeral_storage() -> None:
+    """Fallback for free Render when /var/data is configured but no paid disk exists."""
+    global DATA_DIR, UPLOAD_DIR, BILLS_DIR, PRODUCT_PHOTOS_DIR, BILTY_PHOTOS_DIR, LEGACY_JSON_PATH, DB_PATH
+    DATA_DIR = first_usable_dir(ROOT / "data", Path(tempfile.gettempdir()) / "daily-dispatch-desk-data")
+    UPLOAD_DIR = first_usable_dir(DATA_DIR / "uploads", ROOT / "uploads", Path(tempfile.gettempdir()) / "daily-dispatch-desk-uploads")
+    BILLS_DIR = UPLOAD_DIR / "bills"
+    PRODUCT_PHOTOS_DIR = UPLOAD_DIR / "product-photos"
+    BILTY_PHOTOS_DIR = UPLOAD_DIR / "bilty-photos"
+    LEGACY_JSON_PATH = DATA_DIR / "dispatches.json"
+    DB_PATH = DATA_DIR / "dispatches.db"
+
+
 def ensure_storage() -> None:
-    DATA_DIR.mkdir(exist_ok=True)
-    BILLS_DIR.mkdir(parents=True, exist_ok=True)
-    PRODUCT_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
-    BILTY_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        BILLS_DIR.mkdir(parents=True, exist_ok=True)
+        PRODUCT_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+        BILTY_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        switch_to_ephemeral_storage()
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        BILLS_DIR.mkdir(parents=True, exist_ok=True)
+        PRODUCT_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+        BILTY_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
     init_db()
     migrate_legacy_json_if_needed()
 
@@ -676,6 +733,20 @@ def packing_totals(packing) -> dict:
     }
 
 
+def has_admin_case_override(job: sqlite3.Row) -> bool:
+    """Admin may allow a case-count mismatch only after recording a reason."""
+    return bool((job["admin_override_by"] or "") and (job["admin_note"] or "").strip())
+
+
+def case_count_mismatch(totals: dict, job: sqlite3.Row, order_cases=None) -> bool:
+    order_value = job["total_cases"] if order_cases is None else order_cases
+    try:
+        expected = int(order_value or 0)
+    except (TypeError, ValueError):
+        expected = 0
+    return int(totals.get("totalPackedCases") or 0) != expected
+
+
 def packing_summary(packing) -> str:
     lines = normalize_packing_lines(packing)
     parts = [
@@ -1096,6 +1167,7 @@ def serialize_job(conn: sqlite3.Connection, job_id: str) -> dict:
         "dispatcherNote": job["dispatcher_note"] or "",
         "reviewerNote": job["reviewer_note"] or "",
         "adminNote": job["admin_note"] or "",
+        "adminOverrideBy": job["admin_override_by"] or "",
         "whatsapp": {
             "templateName": job["whatsapp_template_name"],
             "sentStatus": job["whatsapp_sent_status"],
@@ -2180,8 +2252,8 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Enter packing breakup"}, HTTPStatus.BAD_REQUEST)
                 return
             totals = packing_totals(breakup)
-            if totals["totalPackedCases"] != job["total_cases"] and not job["shortage_reason"]:
-                self.send_json({"error": "Packed cases do not match bill cases. Please correct the breakup or enter a valid reason."}, HTTPStatus.BAD_REQUEST)
+            if case_count_mismatch(totals, job) and not has_admin_case_override(job):
+                self.send_json({"error": "Packed cases do not match bill cases. Ask admin to override."}, HTTPStatus.BAD_REQUEST)
                 return
             if job["current_status"] not in {"packing", "needs-correction"}:
                 self.send_json({"error": "This job is not ready to submit for review."}, HTTPStatus.CONFLICT)
@@ -2237,8 +2309,8 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 if not breakup:
                     self.send_json({"error": "Cannot approve. Please enter package breakup."}, HTTPStatus.BAD_REQUEST)
                     return
-                if totals["totalPackedCases"] != int(job["total_cases"] or 0) and not job["shortage_reason"]:
-                    self.send_json({"error": "Cannot approve. Packed cases do not match bill cases."}, HTTPStatus.BAD_REQUEST)
+                if case_count_mismatch(totals, job) and not has_admin_case_override(job):
+                    self.send_json({"error": "Cannot approve. Packed cases do not match bill cases. Admin override is required."}, HTTPStatus.BAD_REQUEST)
                     return
             if decision == "approve" and job["correction_count"] > 0 and not note:
                 self.send_json({"error": "Reviewer note is required after a correction was raised."}, HTTPStatus.BAD_REQUEST)
@@ -2544,6 +2616,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
             job = self.require_job(conn, job_id)
             if not job:
                 return
+            admin_note = payload.get("adminNote", "").strip()
             updates = []
             params = []
             if "dispatcherId" in payload:
@@ -2569,6 +2642,9 @@ class DispatchHandler(BaseHTTPRequestHandler):
             if "totalCases" in payload:
                 updates.append("total_cases = ?")
                 params.append(int(payload["totalCases"]))
+            if "adminNote" in payload:
+                updates.append("admin_note = ?")
+                params.append(admin_note)
             if "transporterDeliveryPartnerName" in payload:
                 updates.append("transporter_delivery_partner_name = ?")
                 params.append(payload["transporterDeliveryPartnerName"].strip())
@@ -2577,6 +2653,14 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 return
             old_status = job["current_status"]
             new_status = payload.get("currentStatus", old_status)
+            packing = conn.execute("SELECT packing_breakup_json FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
+            totals = packing_totals(load_json(packing["packing_breakup_json"], empty_packing())) if packing else {"totalPackages": 0, "totalPackedCases": 0}
+            updated_order_cases = int(payload.get("totalCases", job["total_cases"] or 0) or 0)
+            mismatch_after_edit = totals["totalPackedCases"] and totals["totalPackedCases"] != updated_order_cases
+            status_changed = new_status != old_status
+            if (mismatch_after_edit or status_changed) and not admin_note:
+                self.send_json({"error": "Manual override requires reason."}, HTTPStatus.BAD_REQUEST)
+                return
             updates.extend(["admin_override_by = ?", "updated_at = ?"])
             params.extend([user["id"], now_iso(), job_id])
             conn.execute(f"UPDATE dispatch_jobs SET {', '.join(updates)} WHERE id = ?", params)
