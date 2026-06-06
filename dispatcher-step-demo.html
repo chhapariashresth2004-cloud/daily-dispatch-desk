@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dispatcher Step Demo — Ambe Traders</title>
+  <style>
+    :root { --bg:#f7f5f1; --card:#fff; --ink:#181512; --muted:#746d64; --line:#e6ded5; --orange:#ef7d22; --orange2:#fff0e2; --green:#12805c; --green2:#e9f8f1; --blue:#2563eb; --blue2:#edf4ff; --red:#c2413b; --red2:#fff0ee; --shadow:0 18px 40px rgba(31,24,18,.08); }
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at top left,#ffe6cd,transparent 28%),var(--bg);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--ink)}
+    .shell{max-width:1180px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:14px}.top h1{margin:3px 0;font-size:clamp(1.35rem,3vw,2rem)}.eyebrow{margin:0;color:var(--orange);font-size:.72rem;font-weight:950;letter-spacing:.1em;text-transform:uppercase}.pill{border-radius:999px;padding:8px 12px;background:#fff;border:1px solid var(--line);font-weight:850;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:340px 1fr;gap:14px}.panel{background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);padding:14px}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}.tab{border:0;border-radius:16px;padding:12px 10px;background:#fff;color:var(--muted);font-weight:900;text-align:left}.tab.active{background:var(--orange);color:#fff}.tab strong{display:block;font-size:1.15rem}.job{width:100%;border:1px solid var(--line);border-radius:18px;background:#fff;padding:13px;margin-bottom:10px;text-align:left}.job.active{border-color:var(--orange);box-shadow:0 0 0 4px rgba(239,125,34,.12)}.job h3{margin:0 0 4px;font-size:1rem}.job p{margin:0;color:var(--muted);font-size:.88rem}.status{display:inline-flex;margin-top:9px;border-radius:999px;padding:5px 9px;background:var(--blue2);color:var(--blue);font-size:.76rem;font-weight:900}
+    .progress{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}.stepchip{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;background:#fff;padding:9px 10px;color:var(--muted);font-weight:900}.stepchip span{display:grid;place-items:center;width:24px;height:24px;border-radius:999px;background:#eee}.stepchip.done{background:var(--green2);color:var(--green);border-color:#c8ebdc}.stepchip.done span{background:var(--green);color:#fff}.stepchip.active{background:var(--orange2);color:var(--orange);border-color:#ffd3ad}.stepchip.active span{background:var(--orange);color:#fff}.stepchip.locked{opacity:.55}
+    .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}.summary div{background:#fff;border:1px solid var(--line);border-radius:18px;padding:12px}.summary span{display:block;color:var(--muted);font-size:.78rem;font-weight:800}.summary strong{display:block;margin-top:4px;font-size:1.25rem}.workstep{border:1px solid var(--line);background:#fff;border-radius:22px;padding:14px;margin-top:12px}.workstep.done{background:#f8fffb}.workstep.locked{opacity:.62}.head{display:flex;justify-content:space-between;align-items:center;gap:10px}.head h2{font-size:1.05rem;margin:2px 0}.soft{border-radius:999px;padding:6px 10px;background:var(--orange2);color:var(--orange);font-weight:900;font-size:.78rem}.soft.green{background:var(--green2);color:var(--green)}.soft.grey{background:#f1efec;color:var(--muted)}
+    .uploadbox{margin-top:12px;border:1px dashed #d4c5b6;border-radius:18px;padding:12px;background:#fffaf5;display:grid;gap:10px}.actions{display:flex;gap:8px;flex-wrap:wrap}.btn{border:0;border-radius:999px;padding:11px 14px;font-weight:950;background:var(--orange);color:#fff}.btn.secondary{background:#fff;color:var(--ink);border:1px solid var(--line)}.btn.green{background:var(--green)}.btn:disabled{opacity:.48}.photo-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.photo{height:70px;border-radius:14px;background:linear-gradient(135deg,#ddd,#fafafa);display:grid;place-items:center;color:var(--muted);font-weight:900;font-size:.8rem}
+    .packgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}.pack{border:1px solid var(--line);border-radius:16px;background:#fff;padding:10px}.pack label{display:block;font-weight:950}.pack input{width:100%;margin-top:7px;border:1px solid var(--line);border-radius:12px;padding:10px;font-weight:950;font-size:1rem}.match{margin-top:10px;border-radius:16px;padding:11px 12px;background:var(--green2);color:var(--green);font-weight:950}.note{color:var(--muted);font-size:.9rem;line-height:1.45}.footer{margin-top:14px;border-top:1px solid var(--line);padding-top:12px;color:var(--muted);font-size:.88rem}.mobilehint{display:none}
+    @media(max-width:850px){.grid{grid-template-columns:1fr}.summary{grid-template-columns:1fr 1fr}.progress{grid-template-columns:1fr}.photo-row{grid-template-columns:repeat(2,1fr)}.mobilehint{display:block}.top{align-items:flex-start;flex-direction:column}.packgrid{grid-template-columns:repeat(2,1fr)}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="top">
+      <div><p class="eyebrow">Separate Demo — Not connected to live data</p><h1>Dispatcher step-by-step workflow</h1><p class="note">Purpose: review the proposed UX before adding it to the real Daily Dispatch Desk app.</p></div>
+      <span class="pill">Demo only</span>
+    </div>
+    <section class="grid">
+      <aside class="panel">
+        <div class="tabs"><button class="tab active"><strong>2</strong>My Work</button><button class="tab"><strong>14</strong>Available</button><button class="tab"><strong>5</strong>Submitted</button></div>
+        <button class="job active"><h3>OM SAI GENERAL — MAHUA</h3><p>22 order cases • Assigned</p><span class="status">Next: Goods photo</span></button>
+        <button class="job"><h3>JAI MATA DI — KATIHAR</h3><p>113 order cases • Packing</p><span class="status">Next: Final photo</span></button>
+        <button class="job"><h3>BABA G — BHAGALPUR</h3><p>18 order cases • Correction</p><span class="status">Needs attention</span></button>
+      </aside>
+      <section class="panel">
+        <div class="progress"><div class="stepchip active"><span>1</span>Goods photo</div><div class="stepchip locked"><span>2</span>Packing</div><div class="stepchip locked"><span>3</span>Final photo</div></div>
+        <div class="summary"><div><span>Party</span><strong>OM SAI GENERAL</strong></div><div><span>Order Cases</span><strong>22</strong></div><div><span>Progress</span><strong>1 / 3</strong></div></div>
+        <article class="workstep"><div class="head"><div><p class="eyebrow">Step 1</p><h2>Upload goods photo first</h2></div><span class="soft">Open</span></div><p class="note">Dispatcher first clicks/takes photo of picked goods. Packing section remains locked until this is done.</p><div class="uploadbox"><strong>Goods photo</strong><div class="actions"><button class="btn">Take Photo</button><button class="btn secondary">Upload File</button></div></div></article>
+        <article class="workstep locked"><div class="head"><div><p class="eyebrow">Step 2</p><h2>Packing details unlock after goods photo</h2></div><span class="soft grey">Locked</span></div><div class="packgrid"><div class="pack"><label>1 case packs</label><input value="0" disabled></div><div class="pack"><label>2 case packs</label><input value="0" disabled></div><div class="pack"><label>Bora cases</label><input value="12,10" disabled></div></div></article>
+        <article class="workstep locked"><div class="head"><div><p class="eyebrow">Step 3</p><h2>Final packing photo + submit</h2></div><span class="soft grey">Locked</span></div><p class="note">This opens only after total packed cases match order cases or valid shortage detail is entered.</p><div class="actions"><button class="btn green" disabled>Submit for Review</button></div></article>
+        <div class="footer">Demo behavior: when Step 1 is done, Step 2 opens. When packing is valid, Step 3 opens. This avoids long scrolling and reduces staff confusion.</div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>
