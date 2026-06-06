@@ -26,3 +26,4 @@ jobs:
           git add app.js styles.css apply_mobile_step_mode.py .github/workflows/apply-mobile-step-mode.yml
           git commit -m "Make dispatcher page one step at a time" || exit 0
           git push
+# trigger: 2026-06-06 mobile one-step mode
