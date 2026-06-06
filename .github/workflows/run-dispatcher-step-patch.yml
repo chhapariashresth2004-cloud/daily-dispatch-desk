@@ -1,0 +1,44 @@
+name: Run dispatcher step patch
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/run-dispatcher-step-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract and apply patch
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/apply-dispatcher-steps.yml').read_text(encoding='utf-8')
+          start = text.index('--- a/index.html')
+          end = text.index('\nPATCH\n          git apply', start)
+          patch = text[start:end] + '\n'
+          Path('dispatcher-steps.patch').write_text(patch, encoding='utf-8')
+          PY
+          git apply dispatcher-steps.patch
+
+      - name: Commit patched app files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html app.js styles.css sw.js
+          if git diff --cached --quiet; then
+            echo "No dispatcher step changes to commit"
+          else
+            git commit -m "Make dispatcher workflow step based"
+            git push
+          fi
