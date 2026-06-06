@@ -291,8 +291,29 @@ function selectDispatcherJob(jobId) {
   renderDispatcherDetail();
 }
 
+function ensureDispatcherBackButton() {
+  if (document.getElementById("mobileDispatcherBackButton")) return;
+  const header = document.querySelector(".dispatcher-layout .detail-panel > .section-header");
+  if (!header) return;
+  const button = document.createElement("button");
+  button.id = "mobileDispatcherBackButton";
+  button.type = "button";
+  button.className = "secondary-button mobile-dispatcher-back hidden";
+  button.textContent = "Back to jobs";
+  button.addEventListener("click", () => {
+    state.selectedDispatcherJobId = "";
+    renderDispatcher();
+  });
+  header.appendChild(button);
+}
+
 function renderDispatcherDetail() {
   const job = byId(state.selectedDispatcherJobId);
+  const dispatcherLayout = document.querySelector(".dispatcher-layout");
+  dispatcherLayout?.classList.toggle("has-dispatcher-job", !!job);
+  ensureDispatcherBackButton();
+  const backButton = document.getElementById("mobileDispatcherBackButton");
+  backButton?.classList.toggle("hidden", !job);
   els.dispatcherDetailContent.classList.toggle("hidden", !job);
   els.dispatcherEmptyState.classList.toggle("hidden", !!job);
   if (!job) {
