@@ -1957,3 +1957,20 @@ code {
     top: 52px;
   }
 }
+
+
+.dispatcher-step-tracker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.dispatcher-step-chip { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 999px; background: #fff; padding: 8px 10px; color: var(--muted); font-size: 0.82rem; font-weight: 900; }
+.dispatcher-step-chip span { display: inline-grid; width: 24px; height: 24px; place-items: center; border-radius: 999px; background: var(--grey-soft); color: var(--grey); }
+.dispatcher-step-chip.active { border-color: rgba(36, 107, 255, 0.22); background: var(--blue-soft); color: var(--blue); }
+.dispatcher-step-chip.active span { background: var(--blue); color: #fff; }
+.dispatcher-step-chip.done { border-color: rgba(22, 133, 90, 0.22); background: var(--green-soft); color: var(--green); }
+.dispatcher-step-chip.done span { background: var(--green); color: #fff; }
+.dispatcher-step-chip.locked { opacity: 0.62; }
+.dispatcher-step-panel { border: 1px solid var(--line); border-radius: 18px; background: #fff; padding: 10px; }
+.workflow-step-card.collapsed-step, .dispatcher-step-panel.collapsed-step { padding: 8px 10px; }
+.workflow-step-card.collapsed-step .muted-copy, .workflow-step-card.collapsed-step .upload-card, .workflow-step-card.collapsed-step #submitGoodsReviewButton { display: none; }
+.dispatcher-step-panel.collapsed-step #bankPackingGrid, .dispatcher-step-panel.collapsed-step #shortageSection { display: none; }
+.dispatcher-step-panel.collapsed-step .compact-total-grid { margin-top: 6px; position: static; padding: 6px 8px; }
+.dispatcher-step-panel.collapsed-step .section-header { margin-bottom: 0; }
+@media (max-width: 720px) { .dispatcher-step-tracker { grid-template-columns: 1fr; } .dispatcher-step-chip { justify-content: flex-start; min-height: 42px; } }

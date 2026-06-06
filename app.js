@@ -314,13 +314,14 @@ function renderDispatcherDetail() {
   const packingEditable = ["assigned", "goods-photo-uploaded", "goods-needs-correction", "goods-approved", "packing", "needs-correction"].includes(job.currentStatus);
   const packingVisible = packingEditable || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
   const goodsReady = goodsPhotos.length > 0;
-  const goodsSatisfied = goodsReady || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
+  const finishedStatuses = ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"];
+  const goodsSatisfied = goodsReady || finishedStatuses.includes(job.currentStatus);
   els.goodsCheckSection.classList.toggle("completed-step", goodsSatisfied);
-  els.goodsCheckSection.querySelector(".muted-copy").textContent = goodsSatisfied
-    ? "Picked-goods photo uploaded. Continue with packing."
-    : "You can prepare packing now. Picked-goods photo is still required before submit.";
-  els.packingForm.classList.toggle("hidden", !packingVisible);
-  els.packingProofWrap.classList.toggle("hidden", !packingVisible);
+  els.goodsCheckSection.classList.remove("collapsed-step");
+  els.goodsStepHint.textContent = goodsSatisfied
+    ? "Photo uploaded. Packing details are now open."
+    : "Upload picked-goods photo first. Packing stays locked until this is done.";
+  els.packingForm.classList.toggle("hidden", !packingVisible || !goodsSatisfied);
   els.dispatcherNoteInput.value = job.dispatcherNote || job.packingDetails.dispatcherNote || "";
   fillBankPackingInputs(job.packingDetails.packingBreakup || []);
   els.shortageNoteInput.value = job.shortageNote || "";
@@ -330,11 +331,55 @@ function renderDispatcherDetail() {
   renderShortageBillItems();
   renderSelectedShortageItems();
   renderExceptionSummary();
+  updateDispatcherStepVisibility(job);
   const untouchedClaim = job.currentStatus === "assigned"
     && !(job.packingDetails.packingBreakup || []).length
     && !(job.packingDetails.packingPhotos || []).length
     && !(job.goodsCheck?.photos || []).length;
   els.unassignJobButton.classList.toggle("hidden", !untouchedClaim);
+}
+
+function renderDispatcherStepTracker(steps) {
+  if (!els.dispatcherStepTracker) return;
+  els.dispatcherStepTracker.innerHTML = steps.map((step, index) => `
+    <div class="dispatcher-step-chip ${step.state}">
+      <span>${index + 1}</span>
+      <strong>${escapeHtml(step.label)}</strong>
+    </div>
+  `).join("");
+}
+
+function updateDispatcherStepVisibility(job = byId(state.selectedDispatcherJobId)) {
+  if (!job) return;
+  const goodsPhotos = job.goodsCheck?.photos || [];
+  const packingPhotos = job.packingDetails?.packingPhotos || [];
+  const lines = collectPackingLines();
+  const totals = currentPackingTotals();
+  const goodsDone = goodsPhotos.length > 0 || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
+  const hasPacking = lines.length > 0;
+  const packingMatches = totals.totalPackedCases === Number(job.orderCaseCount || 0);
+  const differenceResolved = hasValidItemDifferenceForTotals(job, totals) || hasAdminMismatchOverride(job);
+  const packingDone = hasPacking && (packingMatches || differenceResolved);
+  const finalDone = packingPhotos.length > 0 || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
+  const submitted = ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
+
+  const packingOpen = goodsDone && !submitted;
+  const finalOpen = packingOpen && packingDone;
+  els.packingEntryStep.classList.toggle("hidden", !packingOpen);
+  els.finalPackingStep.classList.toggle("hidden", !finalOpen);
+  els.goodsCheckSection.classList.toggle("collapsed-step", goodsDone && packingOpen);
+  els.packingEntryStep.classList.toggle("collapsed-step", finalOpen);
+  els.packingEntryStatusLabel.textContent = !goodsDone ? "Locked" : packingDone ? "Done" : "Open";
+  els.finalPackingStatusLabel.textContent = !packingDone ? "Locked" : finalDone ? "Done" : "Open";
+  els.goodsCheckStatusLabel.textContent = goodsDone ? "Done" : "Open";
+  [els.packingCameraButton, els.packingCameraInput, els.packingFileInput, els.submitReviewButton].forEach((control) => {
+    if (control) control.disabled = !finalOpen;
+  });
+  renderDispatcherStepTracker([
+    { label: "Goods photo", state: goodsDone ? "done" : "active" },
+    { label: "Packing", state: !goodsDone ? "locked" : packingDone ? "done" : "active" },
+    { label: "Final photo", state: !packingDone ? "locked" : finalDone ? "done" : "active" },
+  ]);
 }
 
 function goodsStageLabel(status) {
@@ -385,6 +430,7 @@ function syncPackingTotals() {
   const mismatch = job && lines.length > 0 && totals.totalPackedCases !== Number(job.orderCaseCount || 0);
   els.shortageSection.classList.toggle("hidden", !mismatch);
   els.shortageItemsWrap.classList.toggle("hidden", !(mismatch && (job?.billItems || []).length));
+  updateDispatcherStepVisibility(job);
 }
 
 function currentPackingTotals() {
