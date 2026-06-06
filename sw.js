@@ -1,9 +1,9 @@
-self.CACHE_NAME = "dispatch-desk-static-v15-dispatcher-steps";
+﻿self.CACHE_NAME = "dispatch-desk-static-v14-dispatcher-compact";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(self.CACHE_NAME).then((cache) =>
-      cache.addAll(["/", "/index.html", "/styles.css?v=20260606-dispatcher-steps", "/app.js?v=20260606-dispatcher-steps", "/manifest.webmanifest", "/dispatch-icon.svg"])
+      cache.addAll(["/", "/index.html", "/styles.css?v=20260603-dispatcher-compact", "/app.js?v=20260603-dispatcher-compact", "/manifest.webmanifest", "/dispatch-icon.svg"])
     )
   );
   self.skipWaiting();
