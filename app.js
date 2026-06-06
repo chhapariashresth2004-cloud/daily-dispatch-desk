@@ -311,6 +311,7 @@ function renderDispatcherDetail() {
   const job = byId(state.selectedDispatcherJobId);
   const dispatcherLayout = document.querySelector(".dispatcher-layout");
   dispatcherLayout?.classList.toggle("has-dispatcher-job", !!job);
+  document.body.classList.toggle("dispatcher-mobile-work-open", !!job);
   ensureDispatcherBackButton();
   const backButton = document.getElementById("mobileDispatcherBackButton");
   backButton?.classList.toggle("hidden", !job);
