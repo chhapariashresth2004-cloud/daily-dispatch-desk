@@ -1,0 +1,28 @@
+name: Apply fixed mobile dispatcher screen
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apply_fixed_mobile_work_screen.py
+      - .github/workflows/apply-fixed-mobile-work-screen.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply fixed mobile dispatcher screen
+        run: python apply_fixed_mobile_work_screen.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app.js styles.css apply_fixed_mobile_work_screen.py .github/workflows/apply-fixed-mobile-work-screen.yml
+          git commit -m "Make dispatcher mobile work screen fixed" || exit 0
+          git push
