@@ -16,6 +16,7 @@ const state = {
   selectedDispatcherJobId: "",
   selectedReviewerJobId: "",
   selectedAdminJobId: "",
+  selectedBillItemsJobId: "",
   draftBillFileUrl: "",
   draftExtractedBillData: {},
   bulkDrafts: [],
@@ -80,6 +81,8 @@ function bindEvents() {
   els.closeBulkImportButton.addEventListener("click", () => els.bulkImportDialog.close());
   els.bulkBillFilesInput.addEventListener("change", prepareBulkImports);
   els.bulkImportForm.addEventListener("submit", createBulkJobs);
+  els.closeBillItemsButton.addEventListener("click", () => els.billItemsDialog.close());
+  els.billItemsDialogSearch.addEventListener("input", renderBillItemsDialogContent);
   els.reviewerSearchInput.addEventListener("input", renderReviewer);
   els.adminSearchInput.addEventListener("input", renderAdmin);
   els.deliveryPartnerInput.addEventListener("input", autocompleteDeliveryPartner);
@@ -94,12 +97,15 @@ function bindEvents() {
   els.unassignJobButton.addEventListener("click", unassignJob);
   [els.pack1Input, els.pack2Input, els.pack3Input, els.pack4Input, els.pack5Input, els.boraCasesListInput]
     .forEach((input) => input.addEventListener("input", syncPackingTotals));
-  els.shortageItemSearchInput.addEventListener("input", renderShortageBillItems);
+  if (els.shortageItemSearchInput) els.shortageItemSearchInput.addEventListener("input", renderShortageBillItems);
   els.openExceptionDialogButton.addEventListener("click", openExceptionDialog);
   els.closeExceptionDialogButton.addEventListener("click", () => els.itemExceptionDialog.close());
   els.itemExceptionForm.addEventListener("submit", addItemException);
   els.exceptionItemSearchInput.addEventListener("input", renderExceptionItemOptions);
   els.exceptionItemSelect.addEventListener("change", syncSelectedExceptionItem);
+  document.querySelectorAll("[data-mic-target]").forEach((button) => {
+    button.addEventListener("click", () => startVoiceNote(button.dataset.micTarget, button));
+  });
   document.querySelectorAll("[data-review-action]").forEach((button) => {
     button.addEventListener("click", () => reviewDecision(button.dataset.reviewAction));
   });
@@ -381,6 +387,39 @@ function syncPackingTotals() {
   els.shortageItemsWrap.classList.toggle("hidden", !(mismatch && (job?.billItems || []).length));
 }
 
+function currentPackingTotals() {
+  return collectPackingLines().reduce((acc, line) => ({
+    totalPackages: acc.totalPackages + line.packageCount,
+    totalPackedCases: acc.totalPackedCases + line.totalCases,
+  }), { totalPackages: 0, totalPackedCases: 0 });
+}
+
+function hasAdminMismatchOverride(job) {
+  return Boolean(job?.adminOverrideBy && String(job?.adminNote || "").trim());
+}
+
+function itemDifferenceDelta(item) {
+  const billed = Number(item.billedQuantity || 0);
+  const actual = Number(item.actualQuantity || 0);
+  const short = Number(item.shortQuantity || 0);
+  const type = String(item.exceptionType || "short").toLowerCase();
+  if (type === "extra") return short ? Math.abs(short) : Math.max(0, actual - billed);
+  if (["mrp_mismatch", "substitute"].includes(type)) return 0;
+  if (short) return -Math.abs(short);
+  if (actual) return actual - billed;
+  return 0;
+}
+
+function hasValidItemDifferenceForTotals(job, totals) {
+  const expectedDelta = Number(totals.totalPackedCases || 0) - Number(job?.orderCaseCount || 0);
+  if (!expectedDelta) return true;
+  const items = collectSelectedShortageItems();
+  const quantityItems = items.filter((item) => !["mrp_mismatch", "substitute"].includes(String(item.exceptionType || "short").toLowerCase()));
+  if (!quantityItems.length) return false;
+  if (quantityItems.some((item) => !item.reason)) return false;
+  return quantityItems.reduce((sum, item) => sum + itemDifferenceDelta(item), 0) === expectedDelta;
+}
+
 function fillBankPackingInputs(lines) {
   [1, 2, 3, 4, 5].forEach((size) => els[`pack${size}Input`].value = "");
   const boraCases = [];
@@ -418,40 +457,77 @@ function renderShortageBillItems() {
 }
 
 function addShortageItem(item) {
+  const billed = Number(item.quantity ?? item.qty ?? 0);
   const current = collectSelectedShortageItems();
   current.push({
     productName: item.name || item.productName || "",
-    billedQuantity: item.quantity ?? item.qty ?? "",
+    billedQuantity: billed || "",
+    actualQuantity: billed || 0,
     shortQuantity: 0,
     reason: "",
     note: "",
+    exceptionType: "short",
   });
   renderSelectedShortageItems(current);
 }
 
 function renderSelectedShortageItems(items = byId(state.selectedDispatcherJobId)?.shortageItems || []) {
-  els.shortageSelectedItems.innerHTML = items.map((item, index) => `
-    <div class="shortage-selected-row" data-exception-type="${item.exceptionType || "short"}" data-actual-qty="${item.actualQuantity ?? ""}" data-billed-mrp="${item.billedMrp ?? ""}" data-actual-mrp="${item.actualMrp ?? ""}">
-      <strong>${item.productName}</strong>
-      <span>Billed ${item.billedQuantity}</span>
-      <input data-shortage-qty="${index}" type="number" min="0" value="${item.shortQuantity || ""}" placeholder="Short qty" />
-      <select data-shortage-reason="${index}">${shortageReasons.map((reason) => `<option ${reason === item.reason ? "selected" : ""}>${reason}</option>`).join("")}</select>
-      <input data-shortage-note="${index}" value="${item.note || ""}" placeholder="Note" />
-    </div>
-  `).join("");
+  els.shortageSelectedItems.innerHTML = items.map((item, index) => {
+    const type = item.exceptionType || "short";
+    const delta = itemDifferenceDelta(item);
+    const badgeClass = delta < 0 ? "short" : delta > 0 ? "extra" : "neutral";
+    return `
+      <article class="difference-edit-card ${badgeClass}">
+        <div class="difference-edit-head">
+          <strong>${escapeHtml(item.productName || "Item difference")}</strong>
+          <span class="difference-badge ${badgeClass}">${delta < 0 ? `${Math.abs(delta)} short` : delta > 0 ? `${delta} extra` : type.replace("_", " ")}</span>
+        </div>
+        <div class="shortage-selected-row editable-exception-row">
+          <label><span>Product</span><input data-shortage-product="${index}" value="${escapeHtml(item.productName || "")}" placeholder="Product" /></label>
+          <label><span>Type</span><select data-exception-type-edit="${index}">
+            ${["short", "extra", "mrp_mismatch", "substitute"].map((optionType) => `<option value="${optionType}" ${optionType === type ? "selected" : ""}>${optionType.replace("_", " ")}</option>`).join("")}
+          </select></label>
+          <label><span>Billed</span><input data-billed-qty="${index}" type="number" min="0" value="${item.billedQuantity || ""}" placeholder="Billed" /></label>
+          <label><span>Actual</span><input data-actual-qty="${index}" type="number" min="0" value="${item.actualQuantity ?? deliveredQuantity(item)}" placeholder="Actual" /></label>
+          <label><span>Short/Extra</span><input data-shortage-qty="${index}" type="number" min="0" value="${item.shortQuantity || ""}" placeholder="Qty" /></label>
+          <label><span>Reason</span><select data-shortage-reason="${index}">${shortageReasons.map((reason) => `<option ${reason === item.reason ? "selected" : ""}>${reason}</option>`).join("")}</select></label>
+          <label><span>Note</span><input data-shortage-note="${index}" value="${escapeHtml(item.note || "")}" placeholder="Note" /></label>
+          <button type="button" class="danger-button mini-action-button" data-remove-exception="${index}">Remove</button>
+        </div>
+      </article>
+    `;
+  }).join("");
+  els.shortageSelectedItems.querySelectorAll(".editable-exception-row input, .editable-exception-row select").forEach((control) => {
+    control.addEventListener("input", () => {
+      renderExceptionSummary();
+      syncPackingTotals();
+    });
+    control.addEventListener("change", () => {
+      renderExceptionSummary();
+      syncPackingTotals();
+    });
+  });
+  els.shortageSelectedItems.querySelectorAll("[data-remove-exception]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const current = collectSelectedShortageItems();
+      current.splice(Number(button.dataset.removeException), 1);
+      renderSelectedShortageItems(current);
+      renderExceptionSummary(current);
+    });
+  });
 }
 
 function collectSelectedShortageItems() {
   return [...els.shortageSelectedItems.querySelectorAll(".shortage-selected-row")].map((row, index) => ({
-    productName: row.querySelector("strong").textContent,
-    billedQuantity: row.querySelector("span").textContent.replace("Billed ", ""),
+    productName: row.querySelector(`[data-shortage-product="${index}"]`).value.trim(),
+    billedQuantity: Number(row.querySelector(`[data-billed-qty="${index}"]`).value || 0),
     shortQuantity: Number(row.querySelector(`[data-shortage-qty="${index}"]`).value || 0),
-    actualQuantity: Number(row.dataset.actualQty || 0),
+    actualQuantity: Number(row.querySelector(`[data-actual-qty="${index}"]`).value || 0),
     reason: row.querySelector(`[data-shortage-reason="${index}"]`).value,
     note: row.querySelector(`[data-shortage-note="${index}"]`).value.trim(),
-    exceptionType: row.dataset.exceptionType || "short",
-    billedMrp: Number(row.dataset.billedMrp || 0),
-    actualMrp: Number(row.dataset.actualMrp || 0),
+    exceptionType: row.querySelector(`[data-exception-type-edit="${index}"]`).value || "short",
+    billedMrp: 0,
+    actualMrp: 0,
   }));
 }
 
@@ -472,8 +548,39 @@ function syncSelectedExceptionItem() {
   const items = JSON.parse(els.exceptionItemSelect.dataset.filteredItems || "[]");
   const item = items[Number(els.exceptionItemSelect.value)];
   if (!item) return;
-  els.exceptionBilledQtyInput.value = item.quantity ?? item.qty ?? "";
+  const billedQty = Number(item.quantity ?? item.qty ?? 0);
+  els.exceptionBilledQtyInput.value = billedQty || "";
+  els.exceptionActualQtyInput.value = billedQty || "";
   els.exceptionBilledMrpInput.value = item.mrp ?? item.billedMrp ?? "";
+}
+
+function startVoiceNote(targetId, button) {
+  const target = els[targetId];
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!target || !SpeechRecognition) {
+    toast("Mic not supported on this browser", "error");
+    return;
+  }
+  const recognition = new SpeechRecognition();
+  recognition.lang = "hi-IN";
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  const oldText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Listening...";
+  recognition.onresult = (event) => {
+    const text = event.results?.[0]?.[0]?.transcript || "";
+    if (text) {
+      target.value = `${target.value ? `${target.value} ` : ""}${text}`.trim();
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  };
+  recognition.onerror = () => toast("Mic issue. Try again", "error");
+  recognition.onend = () => {
+    button.disabled = false;
+    button.textContent = oldText;
+  };
+  recognition.start();
 }
 
 function addItemException(event) {
@@ -481,14 +588,18 @@ function addItemException(event) {
   const items = JSON.parse(els.exceptionItemSelect.dataset.filteredItems || "[]");
   const item = items[Number(els.exceptionItemSelect.value)] || {};
   const current = collectSelectedShortageItems();
+  const billedQty = Number(els.exceptionBilledQtyInput.value || 0);
+  const actualQty = Number(els.exceptionActualQtyInput.value || 0);
+  const type = els.exceptionTypeInput.value;
+  const qtyDifference = type === "extra" ? Math.max(0, actualQty - billedQty) : Math.max(0, billedQty - actualQty);
   current.push({
     productName: item.name || item.productName || "Manual item",
-    billedQuantity: Number(els.exceptionBilledQtyInput.value || 0),
-    shortQuantity: Math.max(0, Number(els.exceptionBilledQtyInput.value || 0) - Number(els.exceptionActualQtyInput.value || 0)),
-    actualQuantity: Number(els.exceptionActualQtyInput.value || 0),
+    billedQuantity: billedQty,
+    shortQuantity: qtyDifference,
+    actualQuantity: actualQty,
     reason: els.exceptionReasonInput.value,
     note: els.exceptionNoteInput.value.trim(),
-    exceptionType: els.exceptionTypeInput.value,
+    exceptionType: type,
     billedMrp: Number(els.exceptionBilledMrpInput.value || 0),
     actualMrp: Number(els.exceptionActualMrpInput.value || 0),
   });
@@ -499,12 +610,26 @@ function addItemException(event) {
 }
 
 function renderExceptionSummary(items = collectSelectedShortageItems()) {
-  els.exceptionSummaryList.innerHTML = items.map((item) => `
-    <article class="exception-pill">
-      <strong>${item.productName}</strong>
-      <span>${item.exceptionType || "difference"} ? billed ${item.billedQuantity || 0} ? delivered ${deliveredQuantity(item)} ? short ${item.shortQuantity || 0}</span>
+  const totals = currentPackingTotals();
+  const job = byId(state.selectedDispatcherJobId);
+  const expectedDelta = Number(totals.totalPackedCases || 0) - Number(job?.orderCaseCount || 0);
+  const actualDelta = items.reduce((sum, item) => sum + itemDifferenceDelta(item), 0);
+  els.exceptionSummaryList.innerHTML = `
+    <article class="exception-total-card ${expectedDelta === actualDelta ? "ok" : "pending"}">
+      <strong>${expectedDelta === actualDelta ? "Difference matched" : "Difference pending"}</strong>
+      <span>Required ${expectedDelta > 0 ? "+" : ""}${expectedDelta} case ? Entered ${actualDelta > 0 ? "+" : ""}${actualDelta} case</span>
     </article>
-  `).join("");
+    ${items.map((item) => {
+      const delta = itemDifferenceDelta(item);
+      const badge = delta < 0 ? `${Math.abs(delta)} short` : delta > 0 ? `${delta} extra` : item.exceptionType || "difference";
+      return `
+        <article class="exception-pill ${delta < 0 ? "short" : delta > 0 ? "extra" : "neutral"}">
+          <strong>${escapeHtml(item.productName)}</strong>
+          <span>${badge} ? billed ${item.billedQuantity || 0} ? actual ${deliveredQuantity(item)}</span>
+        </article>
+      `;
+    }).join("")}
+  `;
 }
 
 function renderPackingPhotoPreview(photos) {
@@ -669,6 +794,12 @@ async function submitReview() {
   if (!job) return;
   const saved = await savePacking({ refreshAfter: false });
   if (!saved) return;
+  const updatedJob = byId(state.selectedDispatcherJobId) || job;
+  const totals = currentPackingTotals();
+  if (totals.totalPackedCases !== Number(updatedJob.orderCaseCount || 0) && !hasValidItemDifferenceForTotals(updatedJob, totals) && !hasAdminMismatchOverride(updatedJob)) {
+    highlightMissingField("Add item difference matching packed case difference.");
+    return toast("Add item difference matching packed case difference.", "error");
+  }
   const response = await fetch(`/api/dispatches/${job.id}/submit-review`, { method: "POST" });
   const data = await response.json();
   if (!response.ok) return toast(data.error, "error");
@@ -697,16 +828,19 @@ function renderReviewer() {
     ["overview", "Overview"],
     ["review", "Packing Review", jobsBy("submitted-for-review").length],
     ["dispatch", "Dispatch", state.jobs.filter((j) => ["approved-by-reviewer", "dispatch-pending", "dispatched", "delivered"].includes(j.currentStatus)).length],
+    ["hissab", "Hissab"],
     ["completed", "Completed", state.jobs.filter((j) => ["completed", "cancelled"].includes(j.currentStatus)).length],
     ["activity", "Log"],
   ], state.reviewerTab, (id) => { state.reviewerTab = id; renderReviewer(); });
   const activity = state.reviewerTab === "activity";
   const overview = state.reviewerTab === "overview";
+  const hissab = state.reviewerTab === "hissab";
   els.reviewerActivityPanel.classList.toggle("hidden", !activity);
-  els.reviewerDetailPanel.classList.toggle("hidden", activity || overview);
+  els.reviewerDetailPanel.classList.toggle("hidden", activity || overview || hissab);
   els.reviewerList.parentElement.classList.toggle("hidden", activity);
   if (activity) return renderAllActivity(els.reviewerActivityLog);
   if (overview) return renderReviewerOverview();
+  if (hissab) return renderDeliveryHissabInto(els.reviewerList, "reviewer");
   const jobs = reviewerTabJobs();
   els.reviewerList.replaceChildren(createJobTable(jobs));
   if (!jobs.some((job) => job.id === state.selectedReviewerJobId)) state.selectedReviewerJobId = jobs[0]?.id || "";
@@ -784,8 +918,11 @@ function renderReviewerDetail() {
     ["Amount", job.invoiceAmount ?? "—"],
     ["Order cases", job.orderCaseCount],
   ]);
-  els.reviewerBillItems.innerHTML = renderBillItems(job.billItems || []);
-  els.reviewerBillLink.innerHTML = fileLink(job.billFileUrl, "Open bill");
+  els.reviewerBillItems.innerHTML = renderBillItemsSummary(job);
+  els.reviewerBillItems.querySelectorAll("[data-open-bill-items]").forEach((button) => {
+    button.addEventListener("click", () => openBillItemsDialog(button.dataset.openBillItems));
+  });
+  els.reviewerBillLink.innerHTML = "";
   els.reviewerPackingGrid.innerHTML = readonly([
     ["Total packages", job.totalPackages || 0],
     ["Total packed cases", job.totalPackedCases || 0],
@@ -798,8 +935,7 @@ function renderReviewerDetail() {
   els.reviewerPackingTable.innerHTML = renderPackingReviewTable(job.packingDetails.packingBreakup || []);
   const hasPacking = (job.packingDetails.packingBreakup || []).length > 0;
   const hasCaseMismatch = hasPacking && job.totalPackedCases !== job.orderCaseCount;
-  const hasItemDifference = (job.shortageItems || []).length > 0;
-  els.reviewerShortageBlock.classList.toggle("hidden", !(job.shortageReason || hasCaseMismatch || hasItemDifference));
+  els.reviewerShortageBlock.classList.toggle("hidden", !hasCaseMismatch);
   els.reviewerShortageBlock.innerHTML = renderReviewerDifferenceBlock(job, hasCaseMismatch);
   els.reviewerPackingPhotoLink.innerHTML = (job.packingDetails.packingPhotos || []).map((photo, index) => fileLink(photo.fileUrl, `${photo.photoType === "pre-dispatch" ? "Pre-dispatch" : "Final packing"} photo ${index + 1}`)).join("<br>");
   els.reviewerGoodsPhotoLink.innerHTML = (job.goodsCheck?.photos || []).map((photo, index) => fileLink(photo.fileUrl, `Goods photo ${index + 1}`)).join("<br>") || `<span class="muted-copy">No goods photos yet.</span>`;
@@ -840,17 +976,72 @@ function renderReviewerDetail() {
   syncDifferenceWarning();
 }
 
-function renderBillItems(items) {
-  if (!items.length) return `<p class="muted-copy">Bill items not captured.</p>`;
-  return `<div class="bill-items-grid">${items.map((item) => `<div><strong>${item.name || item.productName || "Item"}</strong><span>${item.quantity ?? item.qty ?? ""}</span></div>`).join("")}</div>`;
+function renderBillItemsSummary(job) {
+  const count = (job.billItems || []).length;
+  const billLink = job.billFileUrl
+    ? `<a class="bill-action-button bill-open" href="${escapeHtml(job.billFileUrl)}" target="_blank" rel="noopener">Open Bill PDF</a>`
+    : `<span class="bill-action-button disabled">No Bill PDF</span>`;
+  return `
+    <section class="bill-actions-panel" aria-label="Bill actions">
+      <div class="bill-actions-copy">
+        <strong>Bill items are hidden</strong>
+        <span>${count ? `${count} item${count === 1 ? "" : "s"} captured` : "No item list captured"}</span>
+      </div>
+      <div class="bill-actions-row">
+        <button type="button" class="bill-action-button bill-show" data-open-bill-items="${job.id}">
+          <span>Show Items</span>
+          <strong>${count}</strong>
+        </button>
+        ${billLink}
+      </div>
+    </section>
+  `;
+}
+
+function openBillItemsDialog(jobId) {
+  state.selectedBillItemsJobId = jobId;
+  els.billItemsDialogSearch.value = "";
+  renderBillItemsDialogContent();
+  els.billItemsDialog.showModal();
+}
+
+function renderBillItemsDialogContent() {
+  const job = byId(state.selectedBillItemsJobId);
+  if (!job) return;
+  const items = job.billItems || [];
+  const query = els.billItemsDialogSearch.value.trim().toLowerCase();
+  const filtered = items.filter((item) => String(item.name || item.productName || "").toLowerCase().includes(query));
+  els.billItemsDialogTitle.textContent = `${job.partyName} — ${items.length} bill item${items.length === 1 ? "" : "s"}`;
+  els.billItemsDialogBillLink.innerHTML = fileLink(job.billFileUrl, "Open bill PDF");
+  if (!items.length) {
+    els.billItemsDialogContent.innerHTML = `<p class="muted-copy">Bill items were not captured from this bill. Open the bill PDF to check manually.</p>`;
+    return;
+  }
+  els.billItemsDialogContent.innerHTML = `
+    ${filtered.length ? `
+      <div class="bill-item-card-list">
+        ${filtered.map((item) => `
+          <article class="bill-item-dialog-card">
+            <span>${escapeHtml(item.name || item.productName || "Item")}</span>
+            <strong>${escapeHtml(item.quantity ?? item.qty ?? "")}</strong>
+          </article>
+        `).join("")}
+      </div>
+    ` : `<p class="muted-copy">No item matched your search.</p>`}
+  `;
 }
 
 function renderPackingReviewTable(lines) {
   if (!lines.length) return `<p class="muted-copy">No packing breakup added.</p>`;
+  const sortedLines = [...lines].sort((a, b) => {
+    const caseCompare = Number(a.casesPerPackage || 0) - Number(b.casesPerPackage || 0);
+    if (caseCompare) return caseCompare;
+    return Number(a.packageCount || 0) - Number(b.packageCount || 0);
+  });
   return `
     <table class="mini-table">
-      <thead><tr><th>Type</th><th>Packages</th><th>Cases / Package</th><th>Total Cases</th></tr></thead>
-      <tbody>${lines.map((line) => `<tr><td>${line.packageType}</td><td>${line.packageCount}</td><td>${line.casesPerPackage}</td><td>${line.totalCases}</td></tr>`).join("")}</tbody>
+      <thead><tr><th>Cases / Package</th><th>Packages</th><th>Type</th><th>Total Cases</th></tr></thead>
+      <tbody>${sortedLines.map((line) => `<tr><td>${line.casesPerPackage}</td><td>${line.packageCount}</td><td>${line.packageType}</td><td>${line.totalCases}</td></tr>`).join("")}</tbody>
     </table>
   `;
 }
@@ -1029,15 +1220,17 @@ function renderAdmin() {
     ["overview", "Today"],
     ["jobs", "All Jobs"],
     ["routes", "Routes"],
+    ["hissab", "Hissab"],
     ["reports", "Reports"],
     ["users", "Users"],
     ["activity", "Logs"],
     ["settings", "Settings"],
   ], state.adminTab, (id) => { state.adminTab = id; renderAdmin(); });
-  ["adminOverviewPanel", "adminJobsPanel", "adminRoutesPanel", "adminUsersPanel", "adminReportsPanel", "adminActivityPanel", "adminSettingsPanel"].forEach((id) => els[id].classList.add("hidden"));
+  ["adminOverviewPanel", "adminJobsPanel", "adminRoutesPanel", "adminHissabPanel", "adminUsersPanel", "adminReportsPanel", "adminActivityPanel", "adminSettingsPanel"].forEach((id) => els[id].classList.add("hidden"));
   if (state.adminTab === "overview") renderAdminOverview();
   if (state.adminTab === "jobs") renderAdminJobs();
   if (state.adminTab === "routes") renderRoutes();
+  if (state.adminTab === "hissab") renderDeliveryHissab();
   if (state.adminTab === "users") renderUsers();
   if (state.adminTab === "reports") renderReports();
   if (state.adminTab === "activity") { els.adminActivityPanel.classList.remove("hidden"); renderAllActivity(els.adminActivityLog); }
@@ -1107,6 +1300,7 @@ function renderAdminEdit() {
   els.adminPartyInput.value = job.partyName || "";
   els.adminCityInput.value = job.partyCity || "";
   els.adminCasesInput.value = job.orderCaseCount || "";
+  els.adminNoteInput.value = job.adminNote || "";
   const dispatchers = state.users.filter((user) => user.role === "dispatcher");
   els.adminDispatcherInput.innerHTML = `<option value=""></option>${dispatchers.map((user) => `<option value="${user.id}">${user.name}</option>`).join("")}`;
   els.adminDispatcherInput.value = job.dispatcherId || "";
@@ -1131,6 +1325,7 @@ async function saveAdminEdit(event) {
       totalCases: Number(els.adminCasesInput.value || 0),
       dispatcherId: els.adminDispatcherInput.value,
       currentStatus: els.adminStatusInput.value,
+      adminNote: els.adminNoteInput.value.trim(),
     }),
   });
   const data = await response.json();
@@ -1293,6 +1488,99 @@ function renderReports() {
     </article>
   `;
   document.querySelector("#reportDateInput").addEventListener("input", renderReports);
+}
+
+function packingHissab(job) {
+  const lines = job.packingDetails?.packingBreakup || [];
+  const boraPackages = lines
+    .filter((line) => String(line.packageType || "").toLowerCase() === "bora")
+    .reduce((sum, line) => sum + Number(line.packageCount || 0), 0);
+  const totalPackages = Number(job.totalPackages || 0);
+  const normalPackages = Math.max(0, totalPackages - boraPackages);
+  const packageAmount = normalPackages * 10;
+  const boraAmount = boraPackages * 40;
+  const munshiyana = job.transportMode === "Transport" ? 20 : 0;
+  return {
+    boraPackages,
+    totalPackages,
+    normalPackages,
+    packageAmount,
+    boraAmount,
+    munshiyana,
+    totalAmount: packageAmount + boraAmount + munshiyana,
+  };
+}
+
+function renderDeliveryHissab() {
+  els.adminHissabPanel.classList.remove("hidden");
+  renderDeliveryHissabInto(els.deliveryHissab, "admin");
+}
+
+function renderDeliveryHissabInto(container, context = "admin") {
+  const previousDate = container.querySelector("#hissabDateInput")?.value;
+  const selectedDate = previousDate || today();
+  const search = context === "reviewer" ? els.reviewerSearchInput.value : els.adminSearchInput.value;
+  const jobs = filterJobs(state.jobs, search)
+    .filter((job) => job.dispatchDate === selectedDate)
+    .filter((job) => ["dispatched", "delivered", "completed"].includes(job.currentStatus))
+    .filter((job) => job.deliveryPartnerName);
+  const rows = jobs.map((job) => ({ job, hissab: packingHissab(job) }));
+  const totals = rows.reduce((acc, row) => ({
+    packages: acc.packages + row.hissab.totalPackages,
+    bora: acc.bora + row.hissab.boraPackages,
+    munshiyana: acc.munshiyana + row.hissab.munshiyana,
+    amount: acc.amount + row.hissab.totalAmount,
+  }), { packages: 0, bora: 0, munshiyana: 0, amount: 0 });
+  const partnerTotals = new Map();
+  rows.forEach(({ job, hissab }) => {
+    const key = job.deliveryPartnerName;
+    const current = partnerTotals.get(key) || { name: key, jobs: 0, packages: 0, bora: 0, amount: 0 };
+    current.jobs += 1;
+    current.packages += hissab.totalPackages;
+    current.bora += hissab.boraPackages;
+    current.amount += hissab.totalAmount;
+    partnerTotals.set(key, current);
+  });
+  container.innerHTML = `
+    <div class="section-header">
+      <div><p class="eyebrow">Delivery Partner Hissab</p><h3>${selectedDate}</h3></div>
+      <label class="field compact-date-field"><span>Date</span><input id="hissabDateInput" type="date" value="${selectedDate}" /></label>
+    </div>
+    <div class="metric-grid compact-summary-grid top-gap">
+      ${[
+        ["Jobs", rows.length],
+        ["Packages", totals.packages],
+        ["Bora", totals.bora],
+        ["Munshiyana", formatMoney(totals.munshiyana)],
+        ["Total Hissab", formatMoney(totals.amount)],
+      ].map(([label, value]) => `<article class="metric-card"><span>${label}</span><strong>${value}</strong></article>`).join("")}
+    </div>
+    <div class="report-grid">
+      ${[...partnerTotals.values()].map((partner) => `
+        <article class="report-card hissab-partner-card">
+          <h4>${escapeHtml(partner.name)}</h4>
+          <div class="hissab-card-line"><span>${partner.jobs} dispatch</span><span>${partner.packages} package</span><span>${partner.bora} bora</span><strong>${formatMoney(partner.amount)}</strong></div>
+        </article>
+      `).join("") || `<p class="muted-copy">No delivery partner hissab for this date.</p>`}
+    </div>
+    <div class="responsive-table-wrap top-gap">
+      ${rows.length ? `
+        <table class="mini-table hissab-table">
+          <thead><tr><th>Party</th><th>Partner</th><th>Packages</th><th>Transport</th><th>Hissab</th></tr></thead>
+          <tbody>${rows.map(({ job, hissab }) => `
+            <tr>
+              <td>${escapeHtml(job.partyName)}<br><small>${escapeHtml(job.partyCity || "")}</small></td>
+              <td>${escapeHtml(job.deliveryPartnerName || "")}</td>
+              <td>${hissab.normalPackages} pkg × ₹10<br>${hissab.boraPackages} bora × ₹40</td>
+              <td>${escapeHtml(job.transportName || job.transportMode || "—")}${hissab.munshiyana ? `<br><small>Munshiyana ₹20</small>` : ""}</td>
+              <td><strong>${formatMoney(hissab.totalAmount)}</strong></td>
+            </tr>
+          `).join("")}</tbody>
+        </table>
+      ` : `<p class="empty-state">No dispatched/completed delivery partner work for this date.</p>`}
+    </div>
+  `;
+  container.querySelector("#hissabDateInput").addEventListener("input", () => renderDeliveryHissabInto(container, context));
 }
 
 function renderAllActivity(container) {
@@ -1461,11 +1749,39 @@ function routeOptions(selected = "") {
 }
 
 function renderDeliveryPartnerDirectory() {
-  const names = [...new Set(state.deliveryPartners.map((item) => item.name).filter(Boolean))];
+  const names = [...new Set(state.deliveryPartners.filter((item) => item.active_status !== 0 && item.activeStatus !== false).map((item) => item.name).filter(Boolean))];
   els.deliveryPartnerDirectory.innerHTML = names.map((name) => `<option value="${escapeHtml(name)}"></option>`).join("");
   if (els.deliveryPartnerDirectoryAdmin) {
-    els.deliveryPartnerDirectoryAdmin.innerHTML = names.map((name) => `<span class="directory-chip">${escapeHtml(name)}</span>`).join("") || `<p class="muted-copy">No delivery partners saved yet.</p>`;
+    els.deliveryPartnerDirectoryAdmin.innerHTML = state.deliveryPartners.map((partner) => `
+      <form class="directory-edit-row" data-delivery-partner-id="${partner.id}">
+        <label class="field"><span>Name</span><input data-partner-name value="${escapeHtml(partner.name || "")}" /></label>
+        <label class="field"><span>Preferred transport</span><input data-partner-transport value="${escapeHtml(partner.preferred_transport_name || partner.preferredTransportName || "")}" /></label>
+        <label class="field compact-check"><span>Active</span><input data-partner-active type="checkbox" ${(partner.active_status !== 0 && partner.activeStatus !== false) ? "checked" : ""} /></label>
+        <button class="secondary-button" type="submit">Save</button>
+      </form>
+    `).join("") || `<p class="muted-copy">No delivery partners saved yet.</p>`;
+    els.deliveryPartnerDirectoryAdmin.querySelectorAll("[data-delivery-partner-id]").forEach((form) => {
+      form.addEventListener("submit", saveDeliveryPartner);
+    });
   }
+}
+
+async function saveDeliveryPartner(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = form.dataset.deliveryPartnerId;
+  const response = await fetch(`/api/delivery-partners/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: form.querySelector("[data-partner-name]").value.trim(),
+      preferredTransportName: form.querySelector("[data-partner-transport]").value.trim(),
+      activeStatus: form.querySelector("[data-partner-active]").checked,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) return toast(data.error || "Internet issue. Try again", "error");
+  await refresh("Delivery partner saved");
 }
 
 async function saveRoleLabels(event) {
@@ -1684,7 +2000,10 @@ function highlightMissingField(message) {
     "Upload packing photo": els.packingPhotoPreviewGrid,
     "Enter packing breakup": els.bankPackingGrid,
     "Select shortage reason": els.openExceptionDialogButton,
+    "Add item difference matching packed case difference.": els.openExceptionDialogButton,
     "Packed cases do not match bill cases. Please correct the breakup or enter a valid reason.": els.openExceptionDialogButton,
+    "Packed cases do not match bill cases. Ask admin to override.": els.bankPackingGrid,
+    "Manual override requires reason.": els.adminNoteInput,
     "Enter delivery partner name": els.deliveryPartnerInput,
     "Select transport mode": els.transportModeInput,
     "Select transport name": els.transportNameInput,

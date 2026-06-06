@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import cgi
@@ -747,10 +747,53 @@ def case_count_mismatch(totals: dict, job: sqlite3.Row, order_cases=None) -> boo
     return int(totals.get("totalPackedCases") or 0) != expected
 
 
+def item_difference_delta(item: dict) -> int:
+    try:
+        billed = int(float(item.get("billedQuantity") or 0))
+    except (TypeError, ValueError):
+        billed = 0
+    try:
+        actual = int(float(item.get("actualQuantity") or 0))
+    except (TypeError, ValueError):
+        actual = 0
+    try:
+        short_qty = int(float(item.get("shortQuantity") or 0))
+    except (TypeError, ValueError):
+        short_qty = 0
+    exception_type = str(item.get("exceptionType") or "short").lower()
+    if exception_type == "extra":
+        return abs(short_qty) if short_qty else max(0, actual - billed)
+    if exception_type in {"mrp_mismatch", "substitute"}:
+        return 0
+    # Staff commonly enters only "1 short" while Actual Qty is still prefilled.
+    # In that case the short quantity must drive the case-difference validation.
+    if short_qty:
+        return -abs(short_qty)
+    if actual:
+        return actual - billed
+    return 0
+
+
+def has_valid_item_difference(totals: dict, job: sqlite3.Row) -> bool:
+    expected_delta = int(totals.get("totalPackedCases") or 0) - int(job["total_cases"] or 0)
+    if expected_delta == 0:
+        return True
+    items = load_json(job["shortage_items_json"], [])
+    if not items:
+        return False
+    quantity_items = [item for item in items if str(item.get("exceptionType") or "short").lower() not in {"mrp_mismatch", "substitute"}]
+    if not quantity_items:
+        return False
+    if any(not str(item.get("reason") or "").strip() for item in quantity_items):
+        return False
+    actual_delta = sum(item_difference_delta(item) for item in quantity_items)
+    return actual_delta == expected_delta
+
+
 def packing_summary(packing) -> str:
     lines = normalize_packing_lines(packing)
     parts = [
-        f"{line['packageType']} | {line['packageCount']} × {line['casesPerPackage']} = {line['totalCases']} cases"
+        f"{line['packageType']} | {line['packageCount']} Ã— {line['casesPerPackage']} = {line['totalCases']} cases"
         for line in lines
     ]
     return ", ".join(parts) if parts else "No packing breakup added yet."
@@ -1593,6 +1636,9 @@ class DispatchHandler(BaseHTTPRequestHandler):
         if match := re.fullmatch(r"/api/users/([^/]+)", parsed.path):
             self.require_roles(user, {"admin"}) and self.handle_update_user(match.group(1))
             return
+        if match := re.fullmatch(r"/api/delivery-partners/(\d+)", parsed.path):
+            self.require_roles(user, {"admin"}) and self.handle_update_delivery_partner(int(match.group(1)))
+            return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/packing", parsed.path):
             self.require_roles(user, {"dispatcher"}) and self.handle_save_packing(user, match.group(1))
             return
@@ -2252,8 +2298,8 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Enter packing breakup"}, HTTPStatus.BAD_REQUEST)
                 return
             totals = packing_totals(breakup)
-            if case_count_mismatch(totals, job) and not has_admin_case_override(job):
-                self.send_json({"error": "Packed cases do not match bill cases. Ask admin to override."}, HTTPStatus.BAD_REQUEST)
+            if case_count_mismatch(totals, job) and not (has_valid_item_difference(totals, job) or has_admin_case_override(job)):
+                self.send_json({"error": "Add item difference matching packed case difference."}, HTTPStatus.BAD_REQUEST)
                 return
             if job["current_status"] not in {"packing", "needs-correction"}:
                 self.send_json({"error": "This job is not ready to submit for review."}, HTTPStatus.CONFLICT)
@@ -2309,8 +2355,8 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 if not breakup:
                     self.send_json({"error": "Cannot approve. Please enter package breakup."}, HTTPStatus.BAD_REQUEST)
                     return
-                if case_count_mismatch(totals, job) and not has_admin_case_override(job):
-                    self.send_json({"error": "Cannot approve. Packed cases do not match bill cases. Admin override is required."}, HTTPStatus.BAD_REQUEST)
+                if case_count_mismatch(totals, job) and not (has_valid_item_difference(totals, job) or has_admin_case_override(job)):
+                    self.send_json({"error": "Cannot approve. Item difference does not match packed case difference."}, HTTPStatus.BAD_REQUEST)
                     return
             if decision == "approve" and job["correction_count"] > 0 and not note:
                 self.send_json({"error": "Reviewer note is required after a correction was raised."}, HTTPStatus.BAD_REQUEST)
@@ -2361,7 +2407,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
             job = self.require_bilty_actor_job(conn, user, job_id)
             if not job:
                 return
-            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending", "dispatched"}:
+            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending", "dispatched", "delivered"}:
                 self.send_json({"error": "Bilty can only be added after reviewer approval."}, HTTPStatus.CONFLICT)
                 return
             timestamp = now_iso()
@@ -2474,7 +2520,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
             job = self.require_bilty_actor_job(conn, user, job_id)
             if not job:
                 return
-            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending", "dispatched"}:
+            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending", "dispatched", "delivered"}:
                 self.send_json({"error": "Bilty can only be added after reviewer approval."}, HTTPStatus.CONFLICT)
                 return
             suffix = Path(upload.filename).suffix.lower() or ".jpg"
@@ -2528,7 +2574,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Only approved jobs can be dispatched."}, HTTPStatus.CONFLICT)
                 return
             mode = job["transport_mode"] or ""
-            if not job["delivery_partner_name"]:
+            if mode != "Self" and not job["delivery_partner_name"]:
                 self.send_json({"error": "Enter delivery partner name"}, HTTPStatus.BAD_REQUEST)
                 return
             if not mode:
@@ -2698,6 +2744,7 @@ class DispatchHandler(BaseHTTPRequestHandler):
     def handle_create_delivery_partner(self) -> None:
         payload = self.read_json()
         name = payload.get("name", "").strip()
+        preferred_transport_name = payload.get("preferredTransportName", payload.get("preferred_transport_name", "")).strip()
         if not name:
             self.send_json({"error": "Delivery partner name is required."}, HTTPStatus.BAD_REQUEST)
             return
@@ -2706,12 +2753,70 @@ class DispatchHandler(BaseHTTPRequestHandler):
             conn.execute(
                 """
                 INSERT INTO delivery_partners (name, preferred_transport_name, active_status, created_at, updated_at)
-                VALUES (?, '', 1, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET active_status = 1, updated_at = excluded.updated_at
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                  preferred_transport_name = CASE
+                    WHEN excluded.preferred_transport_name != '' THEN excluded.preferred_transport_name
+                    ELSE delivery_partners.preferred_transport_name
+                  END,
+                  active_status = 1,
+                  updated_at = excluded.updated_at
                 """,
-                (name, timestamp, timestamp),
+                (name, preferred_transport_name, timestamp, timestamp),
             )
-            self.send_json({"ok": True, "name": name}, HTTPStatus.CREATED)
+            row = conn.execute(
+                "SELECT id, name, preferred_transport_name, active_status FROM delivery_partners WHERE name = ?",
+                (name,),
+            ).fetchone()
+            self.send_json(
+                {
+                    "ok": True,
+                    "id": row["id"],
+                    "name": row["name"],
+                    "preferred_transport_name": row["preferred_transport_name"] or "",
+                    "preferredTransportName": row["preferred_transport_name"] or "",
+                    "active_status": bool(row["active_status"]),
+                },
+                HTTPStatus.CREATED,
+            )
+
+    def handle_update_delivery_partner(self, partner_id: int) -> None:
+        payload = self.read_json()
+        name = payload.get("name", "").strip()
+        preferred_transport_name = payload.get("preferredTransportName", payload.get("preferred_transport_name", "")).strip()
+        active_status = 1 if payload.get("activeStatus", True) else 0
+        if not name:
+            self.send_json({"error": "Delivery partner name is required."}, HTTPStatus.BAD_REQUEST)
+            return
+        timestamp = now_iso()
+        with db_connect() as conn:
+            current = conn.execute("SELECT * FROM delivery_partners WHERE id = ?", (partner_id,)).fetchone()
+            if not current:
+                self.send_json({"error": "Delivery partner not found."}, HTTPStatus.NOT_FOUND)
+                return
+            existing = conn.execute("SELECT id FROM delivery_partners WHERE lower(name) = lower(?) AND id != ?", (name, partner_id)).fetchone()
+            if existing:
+                self.send_json({"error": "Delivery partner name already exists."}, HTTPStatus.CONFLICT)
+                return
+            old_name = current["name"]
+            conn.execute(
+                """
+                UPDATE delivery_partners
+                SET name = ?, preferred_transport_name = ?, active_status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (name, preferred_transport_name, active_status, timestamp, partner_id),
+            )
+            if old_name != name:
+                conn.execute("UPDATE dispatch_jobs SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
+                conn.execute("UPDATE bilty_details SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
+                conn.execute("UPDATE route_batches SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
+            self.send_json({
+                "id": partner_id,
+                "name": name,
+                "preferred_transport_name": preferred_transport_name,
+                "active_status": active_status,
+            })
 
     def handle_create_user(self) -> None:
         payload = self.read_json()

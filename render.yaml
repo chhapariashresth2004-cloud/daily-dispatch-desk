@@ -1,9 +1,9 @@
-services:
+﻿services:
   - type: web
     name: daily-dispatch-desk
     env: python
     plan: starter
-    buildCommand: python -c "import pathlib, zipfile; p=pathlib.Path('UPLOAD_TO_GITHUB_NOW.zip'); p.exists() and zipfile.ZipFile(p).extractall('.')" && pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python server.py
     disk:
       name: dispatch-data

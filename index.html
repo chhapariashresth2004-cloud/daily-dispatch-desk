@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -8,7 +8,7 @@
     <meta name="apple-mobile-web-app-title" content="Dispatch Desk" />
     <title>Daily Dispatch Desk</title>
     <link rel="manifest" href="manifest.webmanifest" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260603-dispatcher-compact" />
   </head>
   <body>
     <section id="loginView" class="login-shell">
@@ -69,8 +69,7 @@
                     <div><p class="eyebrow">Step 1</p><h4>Picked goods photo</h4></div>
                     <span id="goodsCheckStatusLabel" class="soft-pill">Waiting</span>
                   </div>
-                  <p class="muted-copy">Take clear photos of the picked goods first. Packing opens as soon as the photo is uploaded.</p>
-                  <section class="upload-card">
+                  <section class="upload-card compact-upload-card">
                     <span>Goods Photos</span>
                     <strong id="goodsPhotoLabel">Upload goods photos</strong>
                     <div class="button-row photo-action-row">
@@ -93,27 +92,27 @@
                     </div>
                     <div id="bankPackingGrid" class="bank-packing-grid">
                       <label class="bank-pack-card">
-                        <span>1 ×</span>
+                        <span>1 Ã—</span>
                         <input id="pack1Input" type="number" min="0" inputmode="numeric" />
                         <small>1 case packs</small>
                       </label>
                       <label class="bank-pack-card">
-                        <span>2 ×</span>
+                        <span>2 Ã—</span>
                         <input id="pack2Input" type="number" min="0" inputmode="numeric" />
                         <small>2 case packs</small>
                       </label>
                       <label class="bank-pack-card">
-                        <span>3 ×</span>
+                        <span>3 Ã—</span>
                         <input id="pack3Input" type="number" min="0" inputmode="numeric" />
                         <small>3 case packs</small>
                       </label>
                       <label class="bank-pack-card">
-                        <span>4 ×</span>
+                        <span>4 Ã—</span>
                         <input id="pack4Input" type="number" min="0" inputmode="numeric" />
                         <small>4 case packs</small>
                       </label>
                       <label class="bank-pack-card">
-                        <span>5 ×</span>
+                        <span>5 Ã—</span>
                         <input id="pack5Input" type="number" min="0" inputmode="numeric" />
                         <small>5 case packs</small>
                       </label>
@@ -124,7 +123,19 @@
                       </label>
                     </div>
                   </section>
-                  <section id="shortageSection" class="warning-panel hidden">
+                  <div id="packingProofWrap" class="proof-grid single-proof-grid top-gap compact-proof-wrap">
+                    <section class="upload-card compact-upload-card">
+                      <span>Packing Photo</span>
+                      <strong id="packingPhotoLabel">Upload packing photos</strong>
+                      <div class="button-row photo-action-row">
+                        <button id="packingCameraButton" type="button" class="secondary-button">Take Photo</button>
+                        <label class="secondary-button file-button">Upload File<input id="packingFileInput" type="file" accept="image/*" multiple /></label>
+                      </div>
+                      <input id="packingCameraInput" class="native-file-input" type="file" accept="image/*" capture="environment" />
+                      <div id="packingPhotoPreviewGrid" class="photo-preview-grid compact-photo-grid"></div>
+                    </section>
+                  </div>
+                  <section id="shortageSection" class="warning-panel hidden compact-warning-panel">
                     <div class="section-header compact-header">
                       <div><p class="eyebrow">Item difference</p><h4>Packed cases do not match order</h4></div>
                     </div>
@@ -132,31 +143,18 @@
                       <button id="openExceptionDialogButton" type="button" class="warning-button">Add Item Difference</button>
                     </div>
                     <div id="exceptionSummaryList" class="exception-summary-list"></div>
-                    <label class="field"><span>Overall Note</span><textarea id="shortageNoteInput" rows="2"></textarea></label>
-                    <div id="shortageItemsWrap" class="hidden">
-                      <label class="field"><span>Search bill item</span><input id="shortageItemSearchInput" placeholder="Search product" /></label>
+                    <label class="field"><span>Overall Note</span><textarea id="shortageNoteInput" rows="1"></textarea></label>
+                    <div id="shortageItemsWrap" class="hidden compact-difference-help">
                       <div id="shortageBillItems" class="shortage-item-list"></div>
                       <div id="shortageSelectedItems" class="shortage-selected-list"></div>
                     </div>
                   </section>
-                  <label class="field"><span>Dispatcher Note</span><textarea id="dispatcherNoteInput" rows="2"></textarea></label>
+                  <label class="field note-field"><span>Dispatcher Note</span><textarea id="dispatcherNoteInput" rows="1"></textarea><button id="dispatcherNoteMicButton" type="button" class="mic-button" data-mic-target="dispatcherNoteInput">Mic</button></label>
                   <div class="button-row">
                     <button id="unassignJobButton" type="button" class="secondary-button hidden">Unassign</button>
                     <button id="submitReviewButton" type="button" class="primary-button">Submit for Review</button>
                   </div>
                 </form>
-                <div id="packingProofWrap" class="proof-grid single-proof-grid top-gap">
-                  <section class="upload-card">
-                    <span>Packing Photo</span>
-                    <strong id="packingPhotoLabel">Upload packing photos</strong>
-                    <div class="button-row photo-action-row">
-                      <button id="packingCameraButton" type="button" class="secondary-button">Take Photo</button>
-                      <label class="secondary-button file-button">Upload from File<input id="packingFileInput" type="file" accept="image/*" multiple /></label>
-                    </div>
-                    <input id="packingCameraInput" class="native-file-input" type="file" accept="image/*" capture="environment" />
-                    <div id="packingPhotoPreviewGrid" class="photo-preview-grid"></div>
-                  </section>
-                </div>
               </div>
             </section>
           </div>
@@ -201,7 +199,7 @@
                 <div>
                   <p class="eyebrow">Reviewer action</p>
                   <form id="goodsReviewDecisionForm" class="stack-form hidden">
-                    <label class="field"><span>Reviewer Note</span><textarea id="goodsReviewerNoteInput" rows="2"></textarea></label>
+                    <label class="field note-field"><span>Reviewer Note</span><textarea id="goodsReviewerNoteInput" rows="2"></textarea><button id="goodsReviewerNoteMicButton" type="button" class="mic-button" data-mic-target="goodsReviewerNoteInput">Mic</button></label>
                     <div class="button-row">
                       <button data-goods-review-action="correction" type="button" class="warning-button">Send Back Goods</button>
                       <button data-goods-review-action="cancel" type="button" class="danger-button">Cancel</button>
@@ -209,7 +207,7 @@
                     </div>
                   </form>
                   <form id="reviewDecisionForm" class="stack-form">
-                    <label class="field"><span>Reviewer Note</span><textarea id="reviewerNoteInput" rows="2"></textarea></label>
+                    <label class="field note-field"><span>Reviewer Note</span><textarea id="reviewerNoteInput" rows="2"></textarea><button id="reviewerNoteMicButton" type="button" class="mic-button" data-mic-target="reviewerNoteInput">Mic</button></label>
                     <div class="button-row">
                       <button data-review-action="correction" type="button" class="warning-button">Send Back</button>
                       <button data-review-action="cancel" type="button" class="danger-button">Cancel</button>
@@ -272,6 +270,7 @@
                 <label class="field"><span>Order Cases</span><input id="adminCasesInput" type="number" min="0" /></label>
                 <label class="field"><span>Dispatcher</span><select id="adminDispatcherInput"></select></label>
                 <label class="field"><span>Status</span><select id="adminStatusInput"></select></label>
+                <label class="field"><span>Admin override reason</span><textarea id="adminNoteInput" rows="3" placeholder="Required for mismatch or status override"></textarea></label>
                 <div id="adminTimingGrid" class="readonly-grid single-column-grid"></div>
                 <button class="primary-button" type="submit">Save Edit</button>
               </form>
@@ -288,6 +287,9 @@
               </form>
             </div>
             <div id="routeBatchList" class="report-grid top-gap"></div>
+          </section>
+          <section id="adminHissabPanel" class="panel hidden">
+            <div id="deliveryHissab"></div>
           </section>
           <section id="adminUsersPanel" class="panel hidden"><div id="userManagementList" class="user-list"></div></section>
           <section id="adminReportsPanel" class="panel hidden"><div id="adminReports" class="report-grid"></div></section>
@@ -385,15 +387,27 @@
           <label class="field"><span>Billed MRP</span><input id="exceptionBilledMrpInput" type="number" min="0" /></label>
           <label class="field"><span>Actual MRP</span><input id="exceptionActualMrpInput" type="number" min="0" /></label>
         </div>
-        <label class="field"><span>Note</span><textarea id="exceptionNoteInput" rows="2"></textarea></label>
+        <label class="field note-field"><span>Note</span><textarea id="exceptionNoteInput" rows="2"></textarea><button id="exceptionNoteMicButton" type="button" class="mic-button" data-mic-target="exceptionNoteInput">Mic</button></label>
         <div class="button-row">
           <button type="submit" class="primary-button">Add Difference</button>
         </div>
       </form>
     </dialog>
 
+    <dialog id="billItemsDialog" class="dialog-card wide-dialog">
+      <form method="dialog" class="stack-form">
+        <div class="section-header">
+          <div><p class="eyebrow">Bill items</p><h3 id="billItemsDialogTitle">Bill Items</h3></div>
+          <button id="closeBillItemsButton" type="button" class="secondary-button">Close</button>
+        </div>
+        <div id="billItemsDialogBillLink"></div>
+        <label class="field"><span>Search item</span><input id="billItemsDialogSearch" placeholder="Search product name" /></label>
+        <div id="billItemsDialogContent" class="bill-items-dialog-list"></div>
+      </form>
+    </dialog>
+
     <template id="metricCardTemplate"><article class="metric-card"><span data-field="label"></span><strong data-field="value"></strong></article></template>
     <template id="jobCardTemplate"><button class="job-card" type="button"><div><strong data-field="party"></strong><span data-field="meta"></span></div><em data-field="status" class="status-pill neutral"></em></button></template>
-    <script src="app.js"></script>
+    <script src="app.js?v=20260603-dispatcher-compact"></script>
   </body>
 </html>
