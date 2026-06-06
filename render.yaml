@@ -3,8 +3,12 @@ services:
     name: daily-dispatch-desk
     env: python
     plan: starter
-    buildCommand: pip install -r requirements.txt
+    buildCommand: python -c "import pathlib, zipfile; p=pathlib.Path('UPLOAD_TO_GITHUB_NOW.zip'); p.exists() and zipfile.ZipFile(p).extractall('.')" && pip install -r requirements.txt
     startCommand: python server.py
+    disk:
+      name: dispatch-data
+      mountPath: /var/data
+      sizeGB: 50
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -14,7 +18,3 @@ services:
         value: /var/data/uploads
       - key: DISPATCH_DB_PATH
         value: /var/data/dispatches.db
-    disk:
-      name: dispatch-data
-      mountPath: /var/data
-      sizeGB: 5
