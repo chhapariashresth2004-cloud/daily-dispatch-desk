@@ -1,0 +1,28 @@
+name: Apply hard mobile no-scroll dispatcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apply_hard_mobile_no_scroll.py
+      - .github/workflows/apply-hard-mobile-no-scroll.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply hard mobile no-scroll dispatcher
+        run: python apply_hard_mobile_no_scroll.py
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app.js styles.css apply_hard_mobile_no_scroll.py .github/workflows/apply-hard-mobile-no-scroll.yml
+          git commit -m "Make dispatcher mobile screen no-scroll" || exit 0
+          git push
