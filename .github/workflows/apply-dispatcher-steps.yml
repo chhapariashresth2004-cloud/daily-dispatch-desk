@@ -1,0 +1,379 @@
+name: Apply dispatcher step UI patch
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/apply-dispatcher-steps.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply dispatcher step patch
+        run: |
+          cat > dispatcher-steps.patch <<'PATCH'
+--- a/index.html
++++ b/index.html
+@@ -8,7 +8,7 @@
+     <meta name="apple-mobile-web-app-title" content="Dispatch Desk" />
+     <title>Daily Dispatch Desk</title>
+     <link rel="manifest" href="manifest.webmanifest" />
+-    <link rel="stylesheet" href="styles.css?v=20260603-dispatcher-compact" />
++    <link rel="stylesheet" href="styles.css?v=20260606-dispatcher-steps" />
+   </head>
+   <body>
+     <section id="loginView" class="login-shell">
+@@ -64,11 +64,13 @@
+               <div id="dispatcherEmptyState" class="empty-state">Select work to begin.</div>
+               <div id="dispatcherDetailContent" class="hidden">
+                 <div id="dispatcherReadonlyGrid" class="readonly-grid"></div>
++                <div id="dispatcherStepTracker" class="dispatcher-step-tracker"></div>
+                 <section id="goodsCheckSection" class="workflow-step-card">
+                   <div class="section-header compact-header">
+                     <div><p class="eyebrow">Step 1</p><h4>Picked goods photo</h4></div>
+                     <span id="goodsCheckStatusLabel" class="soft-pill">Waiting</span>
+                   </div>
++                  <p id="goodsStepHint" class="muted-copy">Upload picked-goods photo to unlock packing.</p>
+                   <section class="upload-card compact-upload-card">
+                     <span>Goods Photos</span>
+                     <strong id="goodsPhotoLabel">Upload goods photos</strong>
+@@ -82,13 +84,14 @@
+                   <button id="submitGoodsReviewButton" type="button" class="primary-button hidden">Submit Goods for Review</button>
+                 </section>
+                 <form id="packingForm" class="stack-form">
+-                  <div class="readonly-grid compact-total-grid">
+-                    <div><span>Total Packages</span><strong id="totalPackagesValue">0</strong></div>
+-                    <div><span>Total Packed Cases</span><strong id="totalPackedCasesValue">0</strong></div>
+-                  </div>
+-                  <section>
++                  <section id="packingEntryStep" class="dispatcher-step-panel">
+                     <div class="section-header compact-header">
+-                      <div><p class="eyebrow">Packing & review prep</p><h4>Quick package entry</h4></div>
++                      <div><p class="eyebrow">Step 2</p><h4>Packing details</h4></div>
++                      <span id="packingEntryStatusLabel" class="soft-pill">Locked</span>
++                    </div>
++                    <div class="readonly-grid compact-total-grid">
++                      <div><span>Total Packages</span><strong id="totalPackagesValue">0</strong></div>
++                      <div><span>Total Packed Cases</span><strong id="totalPackedCasesValue">0</strong></div>
+                     </div>
+                     <div id="bankPackingGrid" class="bank-packing-grid">
+                       <label class="bank-pack-card">
+@@ -122,38 +125,44 @@
+                         <small>Enter each bora separately</small>
+                       </label>
+                     </div>
++                    <section id="shortageSection" class="warning-panel hidden compact-warning-panel">
++                      <div class="section-header compact-header">
++                        <div><p class="eyebrow">Item difference</p><h4>Packed cases do not match order</h4></div>
++                      </div>
++                      <div class="button-row compact-action-row">
++                        <button id="openExceptionDialogButton" type="button" class="warning-button">Add Item Difference</button>
++                      </div>
++                      <div id="exceptionSummaryList" class="exception-summary-list"></div>
++                      <label class="field"><span>Overall Note</span><textarea id="shortageNoteInput" rows="1"></textarea></label>
++                      <div id="shortageItemsWrap" class="hidden compact-difference-help">
++                        <div id="shortageBillItems" class="shortage-item-list"></div>
++                        <div id="shortageSelectedItems" class="shortage-selected-list"></div>
++                      </div>
++                    </section>
+                   </section>
+-                  <div id="packingProofWrap" class="proof-grid single-proof-grid top-gap compact-proof-wrap">
+-                    <section class="upload-card compact-upload-card">
+-                      <span>Packing Photo</span>
+-                      <strong id="packingPhotoLabel">Upload packing photos</strong>
+-                      <div class="button-row photo-action-row">
+-                        <button id="packingCameraButton" type="button" class="secondary-button">Take Photo</button>
+-                        <label class="secondary-button file-button">Upload File<input id="packingFileInput" type="file" accept="image/*" multiple /></label>
+-                      </div>
+-                      <input id="packingCameraInput" class="native-file-input" type="file" accept="image/*" capture="environment" />
+-                      <div id="packingPhotoPreviewGrid" class="photo-preview-grid compact-photo-grid"></div>
+-                    </section>
+-                  </div>
+-                  <section id="shortageSection" class="warning-panel hidden compact-warning-panel">
++                  <section id="finalPackingStep" class="dispatcher-step-panel">
+                     <div class="section-header compact-header">
+-                      <div><p class="eyebrow">Item difference</p><h4>Packed cases do not match order</h4></div>
+-                    </div>
+-                    <div class="button-row compact-action-row">
+-                      <button id="openExceptionDialogButton" type="button" class="warning-button">Add Item Difference</button>
+-                    </div>
+-                    <div id="exceptionSummaryList" class="exception-summary-list"></div>
+-                    <label class="field"><span>Overall Note</span><textarea id="shortageNoteInput" rows="1"></textarea></label>
+-                    <div id="shortageItemsWrap" class="hidden compact-difference-help">
+-                      <div id="shortageBillItems" class="shortage-item-list"></div>
+-                      <div id="shortageSelectedItems" class="shortage-selected-list"></div>
++                      <div><p class="eyebrow">Step 3</p><h4>Final packing photo</h4></div>
++                      <span id="finalPackingStatusLabel" class="soft-pill">Locked</span>
++                    </div>
++                    <div id="packingProofWrap" class="proof-grid single-proof-grid compact-proof-wrap">
++                      <section class="upload-card compact-upload-card">
++                        <span>Final Packing Photo</span>
++                        <strong id="packingPhotoLabel">Upload packing photos</strong>
++                        <div class="button-row photo-action-row">
++                          <button id="packingCameraButton" type="button" class="secondary-button">Take Photo</button>
++                          <label class="secondary-button file-button">Upload File<input id="packingFileInput" type="file" accept="image/*" multiple /></label>
++                        </div>
++                        <input id="packingCameraInput" class="native-file-input" type="file" accept="image/*" capture="environment" />
++                        <div id="packingPhotoPreviewGrid" class="photo-preview-grid compact-photo-grid"></div>
++                      </section>
++                    </div>
++                    <label class="field note-field"><span>Dispatcher Note</span><textarea id="dispatcherNoteInput" rows="1"></textarea><button id="dispatcherNoteMicButton" type="button" class="mic-button" data-mic-target="dispatcherNoteInput">Mic</button></label>
++                    <div class="button-row">
++                      <button id="unassignJobButton" type="button" class="secondary-button hidden">Unassign</button>
++                      <button id="submitReviewButton" type="button" class="primary-button">Submit for Review</button>
+                     </div>
+                   </section>
+-                  <label class="field note-field"><span>Dispatcher Note</span><textarea id="dispatcherNoteInput" rows="1"></textarea><button id="dispatcherNoteMicButton" type="button" class="mic-button" data-mic-target="dispatcherNoteInput">Mic</button></label>
+-                  <div class="button-row">
+-                    <button id="unassignJobButton" type="button" class="secondary-button hidden">Unassign</button>
+-                    <button id="submitReviewButton" type="button" class="primary-button">Submit for Review</button>
+-                  </div>
+                 </form>
+               </div>
+             </section>
+@@ -408,6 +417,6 @@
+ 
+     <template id="metricCardTemplate"><article class="metric-card"><span data-field="label"></span><strong data-field="value"></strong></article></template>
+     <template id="jobCardTemplate"><button class="job-card" type="button"><div><strong data-field="party"></strong><span data-field="meta"></span></div><em data-field="status" class="status-pill neutral"></em></button></template>
+-    <script src="app.js?v=20260603-dispatcher-compact"></script>
++    <script src="app.js?v=20260606-dispatcher-steps"></script>
+   </body>
+ </html>
+--- a/app.js
++++ b/app.js
+@@ -314,13 +314,14 @@
+   const packingEditable = ["assigned", "goods-photo-uploaded", "goods-needs-correction", "goods-approved", "packing", "needs-correction"].includes(job.currentStatus);
+   const packingVisible = packingEditable || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
+   const goodsReady = goodsPhotos.length > 0;
+-  const goodsSatisfied = goodsReady || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
++  const finishedStatuses = ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"];
++  const goodsSatisfied = goodsReady || finishedStatuses.includes(job.currentStatus);
+   els.goodsCheckSection.classList.toggle("completed-step", goodsSatisfied);
+-  els.goodsCheckSection.querySelector(".muted-copy").textContent = goodsSatisfied
+-    ? "Picked-goods photo uploaded. Continue with packing."
+-    : "You can prepare packing now. Picked-goods photo is still required before submit.";
+-  els.packingForm.classList.toggle("hidden", !packingVisible);
+-  els.packingProofWrap.classList.toggle("hidden", !packingVisible);
++  els.goodsCheckSection.classList.remove("collapsed-step");
++  els.goodsStepHint.textContent = goodsSatisfied
++    ? "Photo uploaded. Packing details are now open."
++    : "Upload picked-goods photo first. Packing stays locked until this is done.";
++  els.packingForm.classList.toggle("hidden", !packingVisible || !goodsSatisfied);
+   els.dispatcherNoteInput.value = job.dispatcherNote || job.packingDetails.dispatcherNote || "";
+   fillBankPackingInputs(job.packingDetails.packingBreakup || []);
+   els.shortageNoteInput.value = job.shortageNote || "";
+@@ -330,11 +331,55 @@
+   renderShortageBillItems();
+   renderSelectedShortageItems();
+   renderExceptionSummary();
++  updateDispatcherStepVisibility(job);
+   const untouchedClaim = job.currentStatus === "assigned"
+     && !(job.packingDetails.packingBreakup || []).length
+     && !(job.packingDetails.packingPhotos || []).length
+     && !(job.goodsCheck?.photos || []).length;
+   els.unassignJobButton.classList.toggle("hidden", !untouchedClaim);
++}
++
++function renderDispatcherStepTracker(steps) {
++  if (!els.dispatcherStepTracker) return;
++  els.dispatcherStepTracker.innerHTML = steps.map((step, index) => `
++    <div class="dispatcher-step-chip ${step.state}">
++      <span>${index + 1}</span>
++      <strong>${escapeHtml(step.label)}</strong>
++    </div>
++  `).join("");
++}
++
++function updateDispatcherStepVisibility(job = byId(state.selectedDispatcherJobId)) {
++  if (!job) return;
++  const goodsPhotos = job.goodsCheck?.photos || [];
++  const packingPhotos = job.packingDetails?.packingPhotos || [];
++  const lines = collectPackingLines();
++  const totals = currentPackingTotals();
++  const goodsDone = goodsPhotos.length > 0 || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
++  const hasPacking = lines.length > 0;
++  const packingMatches = totals.totalPackedCases === Number(job.orderCaseCount || 0);
++  const differenceResolved = hasValidItemDifferenceForTotals(job, totals) || hasAdminMismatchOverride(job);
++  const packingDone = hasPacking && (packingMatches || differenceResolved);
++  const finalDone = packingPhotos.length > 0 || ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
++  const submitted = ["submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"].includes(job.currentStatus);
++
++  const packingOpen = goodsDone && !submitted;
++  const finalOpen = packingOpen && packingDone;
++  els.packingEntryStep.classList.toggle("hidden", !packingOpen);
++  els.finalPackingStep.classList.toggle("hidden", !finalOpen);
++  els.goodsCheckSection.classList.toggle("collapsed-step", goodsDone && packingOpen);
++  els.packingEntryStep.classList.toggle("collapsed-step", finalOpen);
++  els.packingEntryStatusLabel.textContent = !goodsDone ? "Locked" : packingDone ? "Done" : "Open";
++  els.finalPackingStatusLabel.textContent = !packingDone ? "Locked" : finalDone ? "Done" : "Open";
++  els.goodsCheckStatusLabel.textContent = goodsDone ? "Done" : "Open";
++  [els.packingCameraButton, els.packingCameraInput, els.packingFileInput, els.submitReviewButton].forEach((control) => {
++    if (control) control.disabled = !finalOpen;
++  });
++  renderDispatcherStepTracker([
++    { label: "Goods photo", state: goodsDone ? "done" : "active" },
++    { label: "Packing", state: !goodsDone ? "locked" : packingDone ? "done" : "active" },
++    { label: "Final photo", state: !packingDone ? "locked" : finalDone ? "done" : "active" },
++  ]);
+ }
+ 
+ function goodsStageLabel(status) {
+@@ -385,6 +430,7 @@
+   const mismatch = job && lines.length > 0 && totals.totalPackedCases !== Number(job.orderCaseCount || 0);
+   els.shortageSection.classList.toggle("hidden", !mismatch);
+   els.shortageItemsWrap.classList.toggle("hidden", !(mismatch && (job?.billItems || []).length));
++  updateDispatcherStepVisibility(job);
+ }
+ 
+ function currentPackingTotals() {
+--- a/styles.css
++++ b/styles.css
+@@ -1757,6 +1757,94 @@
+   gap: 10px;
+ }
+ 
++.dispatcher-step-tracker {
++  display: grid;
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++  gap: 8px;
++}
++
++.dispatcher-step-chip {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  border: 1px solid var(--line);
++  border-radius: 999px;
++  background: #fff;
++  padding: 8px 10px;
++  color: var(--muted);
++  font-size: 0.82rem;
++  font-weight: 900;
++}
++
++.dispatcher-step-chip span {
++  display: inline-grid;
++  width: 24px;
++  height: 24px;
++  place-items: center;
++  border-radius: 999px;
++  background: var(--grey-soft);
++  color: var(--grey);
++}
++
++.dispatcher-step-chip.active {
++  border-color: rgba(36, 107, 255, 0.22);
++  background: var(--blue-soft);
++  color: var(--blue);
++}
++
++.dispatcher-step-chip.active span {
++  background: var(--blue);
++  color: #fff;
++}
++
++.dispatcher-step-chip.done {
++  border-color: rgba(22, 133, 90, 0.22);
++  background: var(--green-soft);
++  color: var(--green);
++}
++
++.dispatcher-step-chip.done span {
++  background: var(--green);
++  color: #fff;
++}
++
++.dispatcher-step-chip.locked {
++  opacity: 0.62;
++}
++
++.dispatcher-step-panel {
++  border: 1px solid var(--line);
++  border-radius: 18px;
++  background: #fff;
++  padding: 10px;
++}
++
++.workflow-step-card.collapsed-step,
++.dispatcher-step-panel.collapsed-step {
++  padding: 8px 10px;
++}
++
++.workflow-step-card.collapsed-step .muted-copy,
++.workflow-step-card.collapsed-step .upload-card,
++.workflow-step-card.collapsed-step #submitGoodsReviewButton {
++  display: none;
++}
++
++.dispatcher-step-panel.collapsed-step #bankPackingGrid,
++.dispatcher-step-panel.collapsed-step #shortageSection {
++  display: none;
++}
++
++.dispatcher-step-panel.collapsed-step .compact-total-grid {
++  margin-top: 6px;
++  position: static;
++  padding: 6px 8px;
++}
++
++.dispatcher-step-panel.collapsed-step .section-header {
++  margin-bottom: 0;
++}
++
+ #dispatcherReadonlyGrid {
+   margin-top: 0;
+   padding: 10px 12px;
+@@ -1930,6 +2018,15 @@
+     padding: 10px;
+   }
+ 
++  .dispatcher-step-tracker {
++    grid-template-columns: 1fr;
++  }
++
++  .dispatcher-step-chip {
++    justify-content: flex-start;
++    min-height: 42px;
++  }
++
+   .compact-upload-card {
+     grid-template-columns: 1fr;
+   }
+--- a/sw.js
++++ b/sw.js
+@@ -1,9 +1,9 @@
+-self.CACHE_NAME = "dispatch-desk-static-v14-dispatcher-compact";
++self.CACHE_NAME = "dispatch-desk-static-v15-dispatcher-steps";
+ 
+ self.addEventListener("install", (event) => {
+   event.waitUntil(
+     caches.open(self.CACHE_NAME).then((cache) =>
+-      cache.addAll(["/", "/index.html", "/styles.css?v=20260603-dispatcher-compact", "/app.js?v=20260603-dispatcher-compact", "/manifest.webmanifest", "/dispatch-icon.svg"])
++      cache.addAll(["/", "/index.html", "/styles.css?v=20260606-dispatcher-steps", "/app.js?v=20260606-dispatcher-steps", "/manifest.webmanifest", "/dispatch-icon.svg"])
+     )
+   );
+   self.skipWaiting();
+PATCH
+          git apply dispatcher-steps.patch
+
+      - name: Commit patched files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html app.js styles.css sw.js
+          if git diff --cached --quiet; then
+            echo "No dispatcher step changes to commit"
+          else
+            git commit -m "Make dispatcher workflow step based"
+            git push
+          fi
