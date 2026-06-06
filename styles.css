@@ -1957,3 +1957,50 @@ code {
     top: 52px;
   }
 }
+
+
+/* Dispatcher step fix: keep workflow visible as steps, not dropdown/collapsed sections. */
+.workflow-step-card.collapsed-step,
+.dispatcher-step-panel.collapsed-step {
+  padding: 10px !important;
+}
+
+.workflow-step-card.collapsed-step .muted-copy,
+.workflow-step-card.collapsed-step .upload-card,
+.workflow-step-card.collapsed-step #submitGoodsReviewButton,
+.dispatcher-step-panel.collapsed-step #bankPackingGrid,
+.dispatcher-step-panel.collapsed-step #shortageSection {
+  display: block !important;
+}
+
+.workflow-step-card.collapsed-step .compact-upload-card {
+  display: grid !important;
+}
+
+.dispatcher-step-panel.collapsed-step .compact-total-grid {
+  margin-top: 0 !important;
+  position: sticky !important;
+  padding: 8px !important;
+}
+
+.dispatcher-step-panel.collapsed-step .section-header {
+  margin-bottom: 6px !important;
+}
+
+#goodsCheckSection,
+#packingEntryStep,
+#finalPackingStep {
+  border: 1px solid rgba(36, 107, 255, 0.18) !important;
+  border-radius: 18px !important;
+  background: #fff !important;
+  box-shadow: 0 8px 24px rgba(20, 35, 55, 0.04);
+}
+
+#bankPackingGrid .bank-pack-card:nth-child(-n+5) > span {
+  font-size: 0 !important;
+}
+#bankPackingGrid .bank-pack-card:nth-child(1) > span::after { content: "1 case"; font-size: 0.94rem; }
+#bankPackingGrid .bank-pack-card:nth-child(2) > span::after { content: "2 case"; font-size: 0.94rem; }
+#bankPackingGrid .bank-pack-card:nth-child(3) > span::after { content: "3 case"; font-size: 0.94rem; }
+#bankPackingGrid .bank-pack-card:nth-child(4) > span::after { content: "4 case"; font-size: 0.94rem; }
+#bankPackingGrid .bank-pack-card:nth-child(5) > span::after { content: "5 case"; font-size: 0.94rem; }
