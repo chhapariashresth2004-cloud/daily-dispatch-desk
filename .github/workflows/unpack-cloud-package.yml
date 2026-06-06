@@ -1,0 +1,38 @@
+name: Unpack cloud package
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - UPLOAD_TO_GITHUB_NOW.zip
+      - .github/workflows/unpack-cloud-package.yml
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Unpack app package
+        run: |
+          test -f UPLOAD_TO_GITHUB_NOW.zip
+          unzip -o UPLOAD_TO_GITHUB_NOW.zip -d .
+
+      - name: Commit unpacked files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .gitignore app.js CLOUD_DEPLOYMENT.md dispatch-icon.svg index.html manifest.webmanifest Procfile README.md render.yaml requirements.txt runtime.txt server.py styles.css sw.js
+          if git diff --cached --quiet; then
+            echo "No unpacked changes to commit"
+          else
+            git commit -m "Unpack latest app package"
+            git push
+          fi
