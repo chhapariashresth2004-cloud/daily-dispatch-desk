@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import cgi
@@ -14,87 +14,69 @@ import sqlite3
 import tempfile
 import uuid
 import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from pypdf import PdfReader
+try:
+    from pypdf import PdfReader
+except Exception:  # pragma: no cover - optional dependency safety
+    PdfReader = None
+
+ROOT = Path(__file__).resolve().parent
 
 
-ROOT = Path(__file__).parent
-
-
-def directory_is_usable(path: Path) -> bool:
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        probe = path / f".write-test-{uuid.uuid4().hex}"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
-        return True
-    except Exception:
-        return False
-
-
-def first_usable_dir(*paths: Path) -> Path:
-    for path in paths:
-        if directory_is_usable(path):
-            return path
+def first_usable_dir(*candidates: Path) -> Path:
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return candidate
+        except OSError:
+            continue
     fallback = Path(tempfile.gettempdir()) / "daily-dispatch-desk-data"
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback
 
 
-def default_data_dir() -> Path:
-    configured = os.environ.get("DISPATCH_DATA_DIR")
-    if configured and directory_is_usable(Path(configured)):
-        return Path(configured)
-    render_disk = Path("/var/data")
-    if os.environ.get("RENDER") and directory_is_usable(render_disk):
-        return render_disk
-    return first_usable_dir(ROOT / "data", Path(tempfile.gettempdir()) / "daily-dispatch-desk-data")
+def configured_data_dir() -> Path:
+    candidates = []
+    env_dir = os.environ.get("DISPATCH_DATA_DIR") or os.environ.get("DATA_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
+    if os.environ.get("RENDER"):
+        candidates.append(Path("/var/data"))
+    candidates.extend([ROOT / "data", Path(tempfile.gettempdir()) / "daily-dispatch-desk-data"])
+    return first_usable_dir(*candidates)
 
 
-DATA_DIR = default_data_dir()
-
-
-def default_upload_dir() -> Path:
-    configured = os.environ.get("DISPATCH_UPLOAD_DIR")
-    if configured and directory_is_usable(Path(configured)):
-        return Path(configured)
-    return first_usable_dir(DATA_DIR / "uploads", ROOT / "uploads", Path(tempfile.gettempdir()) / "daily-dispatch-desk-uploads")
-
-
-def default_db_path() -> Path:
-    configured = os.environ.get("DISPATCH_DB_PATH")
-    if configured:
-        configured_path = Path(configured)
-        if directory_is_usable(configured_path.parent):
-            return configured_path
-    return DATA_DIR / "dispatches.db"
-
-
-UPLOAD_DIR = default_upload_dir()
+DATA_DIR = configured_data_dir()
+UPLOAD_DIR = first_usable_dir(DATA_DIR / "uploads", ROOT / "uploads", Path(tempfile.gettempdir()) / "daily-dispatch-desk-uploads")
 BILLS_DIR = UPLOAD_DIR / "bills"
 PRODUCT_PHOTOS_DIR = UPLOAD_DIR / "product-photos"
 BILTY_PHOTOS_DIR = UPLOAD_DIR / "bilty-photos"
 LEGACY_JSON_PATH = DATA_DIR / "dispatches.json"
-DB_PATH = default_db_path()
-PORT = int(os.environ.get("DISPATCH_PORT", os.environ.get("PORT", "8000")))
-SESSION_DAYS = 7
-
-STATUSES = {
-    "ready",
+DB_PATH = DATA_DIR / "dispatches.db"
+SESSION_COOKIE = "dispatch_session"
+SESSION_TTL_SECONDS = 60 * 60 * 12
+MAX_FILE_SIZE = 18 * 1024 * 1024
+ACTIVE_DISPATCHER_STATUSES = {
     "assigned",
     "goods-photo-uploaded",
     "goods-submitted-for-review",
     "goods-needs-correction",
     "goods-approved",
     "packing",
-    "submitted-for-review",
+    "product-photo-uploaded",
     "needs-correction",
+}
+SUBMITTED_STATUSES = {
+    "submitted-for-review",
     "approved-by-reviewer",
     "dispatch-pending",
     "dispatched",
@@ -102,7 +84,6 @@ STATUSES = {
     "completed",
     "cancelled",
 }
-
 DEFAULT_USERS = [
     ("admin-1", "Admin", "admin", "admin123", "admin"),
     ("reviewer-1", "Reviewer 1", "reviewer1", "reviewer123", "reviewer"),
@@ -222,21 +203,36 @@ def init_db() -> None:
                 shortage_reason TEXT,
                 shortage_note TEXT,
                 shortage_items_json TEXT,
+                optional_reference_number TEXT,
+                bilty_photo_url TEXT,
+                bilty_date TEXT,
+                bilty_package_count INTEGER,
+                bilty_value REAL,
+                freight_amount REAL,
                 dispatcher_note TEXT,
                 reviewer_note TEXT,
                 admin_note TEXT,
-                whatsapp_template_name TEXT,
+                admin_override_by TEXT,
                 whatsapp_sent_status TEXT,
                 whatsapp_sent_at TEXT,
                 whatsapp_message_id TEXT,
                 whatsapp_failed_reason TEXT,
+                ai_check_status TEXT,
+                ai_detected_box_count INTEGER,
+                ai_detected_party_marking TEXT,
+                ai_detected_package_count INTEGER,
+                ai_detected_bilty_number TEXT,
+                ai_detected_bilty_transport_name TEXT,
+                ai_detected_bilty_package_count INTEGER,
+                ai_detected_bilty_date TEXT,
+                ai_photo_quality_score REAL,
+                ai_match_score REAL,
+                ai_risk_level TEXT,
+                ai_summary TEXT,
+                ai_checked_at TEXT,
+                ai_model_version TEXT,
                 bill_uploaded_at TEXT,
                 job_claimed_at TEXT,
-                goods_photo_uploaded_at TEXT,
-                goods_submitted_for_review_at TEXT,
-                goods_reviewed_at TEXT,
-                goods_approved_at TEXT,
-                goods_reviewer_note TEXT,
                 packing_started_at TEXT,
                 product_photo_uploaded_at TEXT,
                 submitted_for_review_at TEXT,
@@ -244,35 +240,11 @@ def init_db() -> None:
                 correction_sent_at TEXT,
                 correction_resubmitted_at TEXT,
                 reviewer_approved_at TEXT,
-                bilty_uploaded_at TEXT,
                 dispatched_at TEXT,
                 delivered_at TEXT,
                 completed_at TEXT,
-                correction_count INTEGER NOT NULL DEFAULT 0,
-                admin_override_by TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(uploaded_by) REFERENCES users(id),
-                FOREIGN KEY(dispatcher_id) REFERENCES users(id),
-                FOREIGN KEY(reviewer_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS packing_details (
-                id TEXT PRIMARY KEY,
-                dispatch_job_id TEXT NOT NULL UNIQUE,
-                packing_breakup_json TEXT NOT NULL,
-                packing_type TEXT,
-                shop_package_count INTEGER NOT NULL DEFAULT 0,
-                packing_photo_urls_json TEXT,
-                closeup_marking_photo_url TEXT,
-                number_of_boxes INTEGER NOT NULL DEFAULT 0,
-                number_of_cases INTEGER NOT NULL DEFAULT 0,
-                dispatcher_note TEXT,
-                product_photo_url TEXT,
-                created_by TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS packing_breakup (
@@ -282,6 +254,45 @@ def init_db() -> None:
                 no_of_packages INTEGER NOT NULL DEFAULT 0,
                 cases_per_package INTEGER NOT NULL DEFAULT 0,
                 total_cases INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS packing_details (
+                id TEXT PRIMARY KEY,
+                dispatch_job_id TEXT NOT NULL UNIQUE,
+                packing_breakup_json TEXT,
+                number_of_boxes INTEGER,
+                number_of_cases INTEGER,
+                dispatcher_note TEXT,
+                product_photo_url TEXT,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS review_details (
+                id TEXT PRIMARY KEY,
+                dispatch_job_id TEXT NOT NULL,
+                reviewer_id TEXT,
+                review_decision TEXT,
+                reviewer_note TEXT,
+                transporter_delivery_partner_name TEXT,
+                reviewed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS bilty_details (
+                id TEXT PRIMARY KEY,
+                dispatch_job_id TEXT NOT NULL UNIQUE,
+                bilty_number TEXT,
+                bilty_photo_url TEXT,
+                delivery_partner_name TEXT,
+                bilty_uploaded_by TEXT,
+                bilty_uploaded_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE
@@ -294,41 +305,7 @@ def init_db() -> None:
                 file_url TEXT NOT NULL,
                 uploaded_by TEXT,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE,
-                FOREIGN KEY(uploaded_by) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS review_details (
-                id TEXT PRIMARY KEY,
-                dispatch_job_id TEXT NOT NULL UNIQUE,
-                reviewer_id TEXT,
-                review_decision TEXT,
-                reviewer_note TEXT,
-                transporter_delivery_partner_name TEXT,
-                reviewed_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE,
-                FOREIGN KEY(reviewer_id) REFERENCES users(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS bilty_details (
-                id TEXT PRIMARY KEY,
-                dispatch_job_id TEXT NOT NULL UNIQUE,
-                bilty_number TEXT,
-                optional_reference_number TEXT,
-                bilty_photo_url TEXT,
-                delivery_partner_name TEXT,
-                bilty_date TEXT,
-                bilty_package_count INTEGER,
-                bilty_value REAL,
-                freight_amount REAL,
-                bilty_uploaded_by TEXT,
-                bilty_uploaded_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE,
-                FOREIGN KEY(bilty_uploaded_by) REFERENCES users(id)
+                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS activity_logs (
@@ -342,8 +319,7 @@ def init_db() -> None:
                 remarks TEXT,
                 metadata_json TEXT,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE CASCADE,
-                FOREIGN KEY(user_id) REFERENCES users(id)
+                FOREIGN KEY(dispatch_job_id) REFERENCES dispatch_jobs(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS ai_photo_checks (
@@ -352,13 +328,6 @@ def init_db() -> None:
                 ai_check_status TEXT,
                 ai_match_score REAL,
                 ai_risk_level TEXT,
-                ai_detected_box_count INTEGER,
-                ai_detected_party_marking TEXT,
-                ai_detected_package_count INTEGER,
-                ai_detected_bilty_number TEXT,
-                ai_detected_bilty_transport_name TEXT,
-                ai_detected_bilty_package_count INTEGER,
-                ai_detected_bilty_date TEXT,
                 ai_detected_items_json TEXT,
                 ai_missing_items_json TEXT,
                 ai_extra_items_json TEXT,
@@ -375,14 +344,35 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS auth_sessions (
                 token TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS delivery_partners (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                active_status INTEGER NOT NULL DEFAULT 1,
+                cost_per_package REAL NOT NULL DEFAULT 10,
+                cost_per_bora REAL NOT NULL DEFAULT 40,
+                munshiyana_per_transport REAL NOT NULL DEFAULT 20,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS transports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                active_status INTEGER NOT NULL DEFAULT 1,
+                default_route TEXT,
+                default_delivery_partner TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS route_names (
                 id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL
+                name TEXT NOT NULL UNIQUE
             );
 
             CREATE TABLE IF NOT EXISTS route_batches (
@@ -395,139 +385,32 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS delivery_partners (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                preferred_transport_name TEXT,
-                active_status INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS transports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                active_status INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             """
         )
         migrate_schema(conn)
-        seed_routes(conn)
         seed_users(conn)
-        seed_settings(conn)
+        seed_directory(conn)
+        seed_routes(conn)
 
 
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
-    return f"{base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
-
-
-def verify_password(password: str, encoded: str) -> bool:
-    try:
-        salt_b64, digest_b64 = encoded.split("$", 1)
-        salt = base64.b64decode(salt_b64)
-        expected = base64.b64decode(digest_b64)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
-        return secrets.compare_digest(digest, expected)
-    except Exception:
-        return False
-
-
-def valid_password_hash(encoded: str | None) -> bool:
-    if not encoded or "$" not in encoded:
-        return False
-    try:
-        salt_b64, digest_b64 = encoded.split("$", 1)
-        base64.b64decode(salt_b64)
-        base64.b64decode(digest_b64)
-        return True
-    except Exception:
-        return False
-
-
-def seed_users(conn: sqlite3.Connection) -> None:
-    timestamp = now_iso()
-    for user_id, name, login, password, role in DEFAULT_USERS:
-        current = conn.execute(
-            "SELECT * FROM users WHERE email_or_mobile = ? OR id = ?",
-            (login, user_id),
-        ).fetchone()
-        if current:
-            updates = {
-                "name": current["name"] or name,
-                "email_or_mobile": current["email_or_mobile"] or login,
-                "role": current["role"] if current["role"] in {"reviewer", "dispatcher", "admin"} else role,
-                "active_status": 1,
-                "updated_at": timestamp,
-            }
-            if not valid_password_hash(current["password_hash"]):
-                updates["password_hash"] = hash_password(password)
-            set_sql = ", ".join(f"{key} = ?" for key in updates)
-            conn.execute(
-                f"UPDATE users SET {set_sql} WHERE id = ?",
-                [*updates.values(), current["id"]],
-            )
-            continue
-        conn.execute(
-            """
-            INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-            """,
-            (user_id, name, login, hash_password(password), role, timestamp, timestamp),
-        )
-
-
-def seed_settings(conn: sqlite3.Connection) -> None:
-    conn.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('dispatcher_label', 'Dispatcher')")
-    conn.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('reviewer_label', 'Reviewer')")
-
-
-def ensure_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
-    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in existing:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def migrate_schema(conn: sqlite3.Connection) -> None:
-    for column, ddl in {
-        "name": "TEXT",
-        "email_or_mobile": "TEXT",
-        "password_hash": "TEXT",
-        "role": "TEXT",
-        "active_status": "INTEGER NOT NULL DEFAULT 1",
-        "created_at": "TEXT",
-        "updated_at": "TEXT",
-    }.items():
-        ensure_column(conn, "users", column, ddl)
-    timestamp = now_iso()
-    conn.execute("UPDATE users SET active_status = 1 WHERE active_status IS NULL")
-    conn.execute("UPDATE users SET created_at = ? WHERE created_at IS NULL OR created_at = ''", (timestamp,))
-    conn.execute("UPDATE users SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''", (timestamp,))
-
-    for column, ddl in {
-        "preferred_transport_name": "TEXT",
-        "active_status": "INTEGER NOT NULL DEFAULT 1",
-        "created_at": "TEXT",
-        "updated_at": "TEXT",
-    }.items():
-        ensure_column(conn, "delivery_partners", column, ddl)
-    conn.execute("UPDATE delivery_partners SET active_status = 1 WHERE active_status IS NULL")
-    conn.execute("UPDATE delivery_partners SET created_at = ? WHERE created_at IS NULL OR created_at = ''", (timestamp,))
-    conn.execute("UPDATE delivery_partners SET updated_at = ? WHERE updated_at IS NULL OR updated_at = ''", (timestamp,))
-
-    for column, ddl in {
+    job_columns = table_columns(conn, "dispatch_jobs")
+    additions = {
         "daily_entry_no": "INTEGER",
         "dispatch_date": "TEXT",
         "party_city": "TEXT",
         "party_mobile_number": "TEXT",
+        "invoice_number": "TEXT",
+        "total_amount": "REAL",
         "bill_items_json": "TEXT",
         "total_packages": "INTEGER NOT NULL DEFAULT 0",
         "total_packed_cases": "INTEGER NOT NULL DEFAULT 0",
@@ -543,38 +426,19 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         "shortage_reason": "TEXT",
         "shortage_note": "TEXT",
         "shortage_items_json": "TEXT",
-        "dispatcher_note": "TEXT",
-        "reviewer_note": "TEXT",
-        "admin_note": "TEXT",
-        "whatsapp_template_name": "TEXT",
-        "whatsapp_sent_status": "TEXT",
-        "whatsapp_sent_at": "TEXT",
-        "whatsapp_message_id": "TEXT",
-        "whatsapp_failed_reason": "TEXT",
-        "completed_at": "TEXT",
-        "goods_photo_uploaded_at": "TEXT",
-        "goods_submitted_for_review_at": "TEXT",
-        "goods_reviewed_at": "TEXT",
-        "goods_approved_at": "TEXT",
-        "goods_reviewer_note": "TEXT",
-    }.items():
-        ensure_column(conn, "dispatch_jobs", column, ddl)
-    for column, ddl in {
-        "packing_type": "TEXT",
-        "shop_package_count": "INTEGER NOT NULL DEFAULT 0",
-        "packing_photo_urls_json": "TEXT",
-        "closeup_marking_photo_url": "TEXT",
-    }.items():
-        ensure_column(conn, "packing_details", column, ddl)
-    for column, ddl in {
         "optional_reference_number": "TEXT",
+        "bilty_photo_url": "TEXT",
         "bilty_date": "TEXT",
         "bilty_package_count": "INTEGER",
         "bilty_value": "REAL",
         "freight_amount": "REAL",
-    }.items():
-        ensure_column(conn, "bilty_details", column, ddl)
-    for column, ddl in {
+        "admin_note": "TEXT",
+        "admin_override_by": "TEXT",
+        "whatsapp_sent_status": "TEXT",
+        "whatsapp_sent_at": "TEXT",
+        "whatsapp_message_id": "TEXT",
+        "whatsapp_failed_reason": "TEXT",
+        "ai_check_status": "TEXT",
         "ai_detected_box_count": "INTEGER",
         "ai_detected_party_marking": "TEXT",
         "ai_detected_package_count": "INTEGER",
@@ -582,98 +446,112 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         "ai_detected_bilty_transport_name": "TEXT",
         "ai_detected_bilty_package_count": "INTEGER",
         "ai_detected_bilty_date": "TEXT",
-    }.items():
-        ensure_column(conn, "ai_photo_checks", column, ddl)
-    conn.execute(
-        """
-        UPDATE dispatch_jobs
-        SET delivery_partner_name = COALESCE(delivery_partner_name, transporter_delivery_partner_name),
-            party_city = COALESCE(party_city, place),
-            dispatch_date = COALESCE(dispatch_date, substr(created_at, 1, 10)),
-            transport_mode = COALESCE(transport_mode, CASE WHEN transporter_delivery_partner_name = '' THEN 'Self' ELSE 'Transport' END)
-        """
-    )
-    conn.execute(
-        """
-        UPDATE packing_details
-        SET shop_package_count = CASE WHEN shop_package_count = 0 THEN number_of_boxes ELSE shop_package_count END,
-            packing_photo_urls_json = COALESCE(packing_photo_urls_json, '[]'),
-            packing_type = COALESCE(packing_type, 'Mixed')
-        """
-    )
-    jobs = conn.execute("SELECT id, extracted_bill_data_json FROM dispatch_jobs").fetchall()
-    for job in jobs:
-        if job["extracted_bill_data_json"]:
-            extracted = load_json(job["extracted_bill_data_json"], {})
-            items = extracted.get("items") or extracted.get("billItems") or []
-            conn.execute(
-                "UPDATE dispatch_jobs SET bill_items_json = COALESCE(bill_items_json, ?) WHERE id = ?",
-                (json.dumps(items), job["id"]),
-            )
-    packing_jobs = conn.execute("SELECT id FROM dispatch_jobs").fetchall()
-    for job in packing_jobs:
-        lines = conn.execute(
+        "ai_photo_quality_score": "REAL",
+        "ai_match_score": "REAL",
+        "ai_risk_level": "TEXT",
+        "ai_summary": "TEXT",
+        "ai_checked_at": "TEXT",
+        "ai_model_version": "TEXT",
+        "bill_uploaded_at": "TEXT",
+        "job_claimed_at": "TEXT",
+        "packing_started_at": "TEXT",
+        "product_photo_uploaded_at": "TEXT",
+        "submitted_for_review_at": "TEXT",
+        "reviewed_at": "TEXT",
+        "correction_sent_at": "TEXT",
+        "correction_resubmitted_at": "TEXT",
+        "reviewer_approved_at": "TEXT",
+        "dispatched_at": "TEXT",
+        "delivered_at": "TEXT",
+        "completed_at": "TEXT",
+    }
+    for column, definition in additions.items():
+        if column not in job_columns:
+            conn.execute(f"ALTER TABLE dispatch_jobs ADD COLUMN {column} {definition}")
+
+    if "bill_date" in job_columns and "invoice_number" in additions:
+        conn.execute("UPDATE dispatch_jobs SET dispatch_date = COALESCE(dispatch_date, bill_date)")
+    conn.execute("UPDATE dispatch_jobs SET party_city = COALESCE(NULLIF(party_city, ''), place)")
+    conn.execute("UPDATE dispatch_jobs SET total_packages = COALESCE(total_packages, 0), total_packed_cases = COALESCE(total_packed_cases, 0)")
+    conn.execute("UPDATE dispatch_jobs SET dispatch_date = COALESCE(dispatch_date, substr(created_at, 1, 10))")
+
+    partner_columns = table_columns(conn, "delivery_partners")
+    partner_additions = {
+        "cost_per_package": "REAL NOT NULL DEFAULT 10",
+        "cost_per_bora": "REAL NOT NULL DEFAULT 40",
+        "munshiyana_per_transport": "REAL NOT NULL DEFAULT 20",
+    }
+    for column, definition in partner_additions.items():
+        if column not in partner_columns:
+            conn.execute(f"ALTER TABLE delivery_partners ADD COLUMN {column} {definition}")
+
+    transport_columns = table_columns(conn, "transports")
+    for column, definition in {"default_route": "TEXT", "default_delivery_partner": "TEXT"}.items():
+        if column not in transport_columns:
+            conn.execute(f"ALTER TABLE transports ADD COLUMN {column} {definition}")
+
+    packing_columns = table_columns(conn, "packing_details")
+    if "product_photo_url" not in packing_columns:
+        conn.execute("ALTER TABLE packing_details ADD COLUMN product_photo_url TEXT")
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    return f"sha256${salt}${digest}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        scheme, salt, digest = stored.split("$", 2)
+    except ValueError:
+        return False
+    if scheme != "sha256":
+        return False
+    check = hashlib.sha256(f"{salt}:{password}".encode()).hexdigest()
+    return secrets.compare_digest(check, digest)
+
+
+def seed_users(conn: sqlite3.Connection) -> None:
+    timestamp = now_iso()
+    for user_id, name, login, password, role in DEFAULT_USERS:
+        existing = conn.execute("SELECT id FROM users WHERE id = ? OR email_or_mobile = ?", (user_id, login)).fetchone()
+        if existing:
+            continue
+        conn.execute(
             """
-            SELECT packing_type, no_of_packages, cases_per_package, total_cases
-            FROM packing_breakup
-            WHERE dispatch_job_id = ?
+            INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
             """,
-            (job["id"],),
-        ).fetchall()
-        if not lines:
-            legacy = conn.execute(
-                "SELECT packing_breakup_json FROM packing_details WHERE dispatch_job_id = ?",
-                (job["id"],),
-            ).fetchone()
-            legacy_lines = normalize_packing_lines(load_json(legacy["packing_breakup_json"] if legacy else None, []))
-            for line in legacy_lines:
-                conn.execute(
-                    """
-                    INSERT INTO packing_breakup
-                    (id, dispatch_job_id, packing_type, no_of_packages, cases_per_package, total_cases, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(uuid.uuid4()),
-                        job["id"],
-                        line["packageType"],
-                        line["packageCount"],
-                        line["casesPerPackage"],
-                        line["totalCases"],
-                        now_iso(),
-                        now_iso(),
-                    ),
-                )
-            lines = conn.execute(
-                """
-                SELECT packing_type, no_of_packages, cases_per_package, total_cases
-                FROM packing_breakup
-                WHERE dispatch_job_id = ?
-                """,
-                (job["id"],),
-            ).fetchall()
-        if lines:
-            total_packages = sum(line["no_of_packages"] for line in lines)
-            total_packed_cases = sum(line["total_cases"] for line in lines)
-            conn.execute(
-                "UPDATE dispatch_jobs SET total_packages = ?, total_packed_cases = ? WHERE id = ?",
-                (total_packages, total_packed_cases, job["id"]),
-            )
-    rows = conn.execute(
-        """
-        SELECT dispatch_job_id, product_photo_url, packing_photo_urls_json
-        FROM packing_details
-        WHERE product_photo_url IS NOT NULL AND product_photo_url != ''
-        """
-    ).fetchall()
-    for row in rows:
-        current = load_json(row["packing_photo_urls_json"], [])
-        if row["product_photo_url"] not in current:
-            current.append(row["product_photo_url"])
-            conn.execute(
-                "UPDATE packing_details SET packing_photo_urls_json = ? WHERE dispatch_job_id = ?",
-                (json.dumps(current), row["dispatch_job_id"]),
-            )
+            (user_id, name, login, hash_password(password), role, timestamp, timestamp),
+        )
+
+
+def seed_directory(conn: sqlite3.Connection) -> None:
+    timestamp = now_iso()
+    for name in ["Ravi", "Shubham", "Janak", "Shiva", "Bajrang", "Self"]:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO delivery_partners (name, active_status, cost_per_package, cost_per_bora, munshiyana_per_transport, created_at, updated_at)
+            VALUES (?, 1, 10, 40, 20, ?, ?)
+            """,
+            (name, timestamp, timestamp),
+        )
+    for name, route, partner in [
+        ("New Bajrang Transport", "Route 1", "Ravi"),
+        ("Vikash Roadways", "Route 2", "Shubham"),
+        ("Shubham Transport", "Route 3", "Shubham"),
+        ("Bhardwaj Transport", "Route 1", "Janak"),
+        ("Janta", "Route 2", "Janak"),
+        ("Self", "Route 1", "Self"),
+    ]:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO transports (name, active_status, default_route, default_delivery_partner, created_at, updated_at)
+            VALUES (?, 1, ?, ?, ?, ?)
+            """,
+            (name, route, partner, timestamp, timestamp),
+        )
 
 
 def seed_routes(conn: sqlite3.Connection) -> None:
@@ -682,861 +560,571 @@ def seed_routes(conn: sqlite3.Connection) -> None:
     conn.executemany("INSERT INTO route_names (id, name) VALUES (?, ?)", [(1, "Route 1"), (2, "Route 2"), (3, "Route 3")])
 
 
-def normalize_packing_lines(value) -> list[dict]:
-    if isinstance(value, list):
-        lines = []
-        for item in value:
-            package_type = str(item.get("packageType", item.get("type", ""))).strip() or "Other"
-            package_count = int(item.get("packageCount", item.get("count", 0)) or 0)
-            cases_per_package = int(item.get("casesPerPackage", 1) or 1)
-            total_cases = package_count * cases_per_package
-            if package_count or total_cases:
-                lines.append(
-                    {
-                        "packageType": package_type,
-                        "packageCount": package_count,
-                        "casesPerPackage": cases_per_package,
-                        "totalCases": total_cases,
-                    }
-                )
-        return lines
-    if isinstance(value, dict):
-        lines = []
-        for key in ["1", "2", "3", "4", "5"]:
-            if int(value.get(key, 0) or 0):
-                lines.append(
-                    {
-                        "packageType": "Carton",
-                        "packageCount": int(value[key]),
-                        "casesPerPackage": int(key),
-                        "totalCases": int(value[key]) * int(key),
-                    }
-                )
-        if int(value.get("bora", 0) or 0):
-            lines.append(
-                {
-                    "packageType": "Bora",
-                    "packageCount": int(value["bora"]),
-                    "casesPerPackage": 1,
-                    "totalCases": int(value["bora"]),
-                }
-            )
-        return lines
-    return []
+def json_loads(value, fallback):
+    if value is None or value == "":
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
 
 
-def packing_totals(packing) -> dict:
-    lines = normalize_packing_lines(packing)
-    return {
-        "totalPackages": sum(line["packageCount"] for line in lines),
-        "totalPackedCases": sum(line["totalCases"] for line in lines),
+def normalize_status(value: str) -> str:
+    value = (value or "Ready").strip().lower().replace(" ", "-").replace("_", "-")
+    aliases = {
+        "approved": "approved-by-reviewer",
+        "ready-for-dispatch": "dispatch-pending",
+        "bilty-pending": "dispatch-pending",
+        "product-photo-uploaded": "product-photo-uploaded",
     }
+    return aliases.get(value, value or "ready")
 
 
-def has_admin_case_override(job: sqlite3.Row) -> bool:
-    """Admin may allow a case-count mismatch only after recording a reason."""
-    return bool((job["admin_override_by"] or "") and (job["admin_note"] or "").strip())
+def normalize_photo_type(value: str) -> str:
+    value = (value or "packing").strip().lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "product": "packing",
+        "product-photo": "packing",
+        "pre-dispatch": "pre-dispatch",
+        "pre-dispatch-photo": "pre-dispatch",
+        "final-packing": "packing",
+        "packing-photo": "packing",
+        "closeup": "close-up-marking",
+        "close-up": "close-up-marking",
+        "goods": "goods-check",
+        "goods-photo": "goods-check",
+        "picked-goods": "goods-check",
+        "picked-goods-photo": "goods-check",
+        "bilty": "bilty",
+        "bilty-photo": "bilty",
+        "delivery-proof": "delivery-proof",
+    }
+    return aliases.get(value, value)
 
 
-def case_count_mismatch(totals: dict, job: sqlite3.Row, order_cases=None) -> bool:
-    order_value = job["total_cases"] if order_cases is None else order_cases
-    try:
-        expected = int(order_value or 0)
-    except (TypeError, ValueError):
-        expected = 0
-    return int(totals.get("totalPackedCases") or 0) != expected
+def normalize_bill_items(raw_items) -> list[dict]:
+    items = []
+    if not isinstance(raw_items, list):
+        return items
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("productName") or item.get("description") or "").strip()
+        qty = item.get("quantity", item.get("billedQuantity", item.get("cases", item.get("qty", 0))))
+        try:
+            qty = int(float(qty or 0))
+        except (TypeError, ValueError):
+            qty = 0
+        if name:
+            items.append({"id": item.get("id") or str(uuid.uuid4()), "name": name, "quantity": qty})
+    return items
 
 
-def item_difference_delta(item: dict) -> int:
-    try:
-        billed = int(float(item.get("billedQuantity") or 0))
-    except (TypeError, ValueError):
-        billed = 0
-    try:
-        actual = int(float(item.get("actualQuantity") or 0))
-    except (TypeError, ValueError):
-        actual = 0
-    try:
-        short_qty = int(float(item.get("shortQuantity") or 0))
-    except (TypeError, ValueError):
-        short_qty = 0
+def normalize_exception_items(raw_items) -> list[dict]:
+    items = []
+    if not isinstance(raw_items, list):
+        return items
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("productName") or "").strip()
+        if not name:
+            continue
+        exception_type = str(item.get("exceptionType") or item.get("type") or "short").strip() or "short"
+        reason = str(item.get("reason") or "").strip()
+        note = str(item.get("note") or "").strip()
+        try:
+            billed = int(float(item.get("billedQuantity", item.get("quantity", 0)) or 0))
+        except (TypeError, ValueError):
+            billed = 0
+        try:
+            actual = int(float(item.get("actualQuantity", billed) or 0))
+        except (TypeError, ValueError):
+            actual = billed
+        try:
+            short_qty = int(float(item.get("shortQuantity", abs(billed - actual)) or 0))
+        except (TypeError, ValueError):
+            short_qty = abs(billed - actual)
+        items.append({
+            "id": item.get("id") or str(uuid.uuid4()),
+            "name": name,
+            "exceptionType": exception_type,
+            "billedQuantity": billed,
+            "actualQuantity": actual,
+            "shortQuantity": short_qty,
+            "reason": reason,
+            "note": note,
+        })
+    return items
+
+
+def exception_item_delta(item: dict) -> int:
+    billed = int(item.get("billedQuantity") or 0)
+    actual = int(item.get("actualQuantity") or 0)
+    short_qty = int(item.get("shortQuantity") or 0)
     exception_type = str(item.get("exceptionType") or "short").lower()
     if exception_type == "extra":
         return abs(short_qty) if short_qty else max(0, actual - billed)
     if exception_type in {"mrp_mismatch", "substitute"}:
         return 0
-    # Staff commonly enters only "1 short" while Actual Qty is still prefilled.
-    # In that case the short quantity must drive the case-difference validation.
     if short_qty:
         return -abs(short_qty)
-    if actual:
-        return actual - billed
-    return 0
+    return actual - billed
 
 
-def has_valid_item_difference(totals: dict, job: sqlite3.Row) -> bool:
-    expected_delta = int(totals.get("totalPackedCases") or 0) - int(job["total_cases"] or 0)
-    if expected_delta == 0:
+def exception_items_match_delta(raw_items, expected_delta: int) -> bool:
+    items = normalize_exception_items(raw_items)
+    if not expected_delta:
         return True
-    items = load_json(job["shortage_items_json"], [])
-    if not items:
-        return False
-    quantity_items = [item for item in items if str(item.get("exceptionType") or "short").lower() not in {"mrp_mismatch", "substitute"}]
-    if not quantity_items:
-        return False
-    if any(not str(item.get("reason") or "").strip() for item in quantity_items):
-        return False
-    actual_delta = sum(item_difference_delta(item) for item in quantity_items)
+    actual_delta = sum(
+        exception_item_delta(item)
+        for item in items
+        if str(item.get("exceptionType") or "short").lower() not in {"mrp_mismatch", "substitute"}
+    )
     return actual_delta == expected_delta
 
 
 def packing_summary(packing) -> str:
     lines = normalize_packing_lines(packing)
     parts = [
-        f"{line['packageType']} | {line['packageCount']} Ã— {line['casesPerPackage']} = {line['totalCases']} cases"
+        f"{line['packageType']} | {line['packageCount']} x {line['casesPerPackage']} = {line['totalCases']} cases"
         for line in lines
     ]
     return ", ".join(parts) if parts else "No packing breakup added yet."
 
 
-def empty_packing() -> list[dict]:
-    return []
+def extract_invoice_from_pdf(file_path: Path) -> dict:
+    if PdfReader is None:
+        return {"error": "PDF extraction dependency not available"}
+    try:
+        reader = PdfReader(str(file_path))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception as exc:  # pragma: no cover - third-party parser
+        return {"error": str(exc)}
 
+    compact = re.sub(r"[ \t]+", " ", text)
+    upper = compact.upper()
 
-def extract_pdf_text(file_path: Path) -> str:
-    reader = PdfReader(str(file_path))
-    return "\n".join(page.extract_text() or "" for page in reader.pages)
+    def first_match(patterns):
+        for pattern in patterns:
+            match = re.search(pattern, compact, re.IGNORECASE)
+            if match:
+                return match.group(1).strip(" :-#\n\t")
+        return ""
 
+    invoice_number = first_match([
+        r"Invoice\s*(?:No\.?|Number)?\s*[:#-]?\s*([A-Z0-9/-]+)",
+        r"Inv\.?\s*No\.?\s*[:#-]?\s*([A-Z0-9/-]+)",
+    ])
+    invoice_date = first_match([
+        r"Invoice\s*Date\s*[:#-]?\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})",
+        r"Date\s*[:#-]?\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})",
+    ])
+    party_name = first_match([
+        r"Party\s*Name\s*[:#-]?\s*(.+?)(?:\n|GST|State|Place|City)",
+        r"Bill\s*To\s*[:#-]?\s*(.+?)(?:\n|GST|State|Place|City)",
+        r"Buyer\s*[:#-]?\s*(.+?)(?:\n|GST|State|Place|City)",
+    ])
+    party_city = first_match([
+        r"(?:City|Place|Station)\s*[:#-]?\s*([A-Za-z ]{2,40})",
+        r"\bTO\s*[:#-]?\s*([A-Za-z ]{2,40})",
+    ])
+    amount = first_match([
+        r"(?:Grand\s*Total|Invoice\s*Total|Net\s*Amount|Total)\s*[:#-]?\s*₹?\s*([0-9,]+(?:\.\d+)?)",
+    ])
+    freight = first_match([
+        r"(?:Freight|Freight\s*Amount|Transport\s*Charge|Delivery\s*Charge)\s*[:#-]?\s*₹?\s*([0-9,]+(?:\.\d+)?)",
+    ])
 
-def parse_bill_text(text: str) -> dict:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    first_line = lines[0] if lines else ""
-    cleaned_first = re.sub(r"\([^)]*\)", "", first_line).strip()
-    cleaned_first = re.sub(r"\s+", " ", cleaned_first)
-    title_parts = cleaned_first.split()
-    party = " ".join(title_parts[:-1]).strip() if len(title_parts) > 1 else cleaned_first
-    place = title_parts[-1].strip() if len(title_parts) > 1 else ""
-    invoice_match = re.search(r"Invoice No\.\s*:\s*([A-Z0-9-]+)", text, flags=re.I)
-    date_match = re.search(r"Date\s*:\s*(\d{2}/\d{2}/\d{4})", text, flags=re.I)
-    address_match = re.search(r"Address\.\s*:\s*([^\n]+)", text, flags=re.I)
-    cases_match = re.search(r"\}\s*(\d+)\s+CSTOTAL", text, flags=re.I)
-    amount_match = re.search(r"\}\s*\d+\s+CSTOTAL\s+([0-9,]+\.\d{2})", text, flags=re.I)
-    freight_match = re.search(r"FREIGHT\s*:\s*([0-9,]+\.\d{2})", text, flags=re.I)
-    raw_address = address_match.group(1).strip() if address_match else ""
-    mode = "self" if raw_address.upper() == "SELF" else "transport"
-    transporter = "" if mode == "self" else raw_address
-    bill_date = datetime.strptime(date_match.group(1), "%d/%m/%Y").date().isoformat() if date_match else ""
-    total_amount = float(amount_match.group(1).replace(",", "")) if amount_match else None
-    items = []
-    for line in lines:
-        item_match = re.match(r"^\d+\s+(.+?)\s+(\d+):0\s+CASE\b", line, flags=re.I)
-        if item_match:
-            items.append(
-                {
-                    "name": item_match.group(1).strip(),
-                    "quantity": int(item_match.group(2)),
-                }
-            )
+    item_rows = []
+    total_cases = 0
+    for line in text.splitlines():
+        clean = re.sub(r"\s+", " ", line).strip()
+        if not clean or len(clean) < 5:
+            continue
+        qty_match = re.search(r"(.+?)\s+(\d+)\s*(?:CS|CASE|CASES|C/S|PCS)?\s*$", clean, re.IGNORECASE)
+        if qty_match and not re.search(r"TOTAL|AMOUNT|GST|INVOICE", clean, re.IGNORECASE):
+            name = qty_match.group(1).strip(" -|:")
+            qty = int(qty_match.group(2))
+            if name and qty < 10000:
+                item_rows.append({"id": str(uuid.uuid4()), "name": name[:120], "quantity": qty})
+                total_cases += qty
+
+    case_match = re.search(r"(?:Total\s*)?(?:Cases|Case|C/S|Cs)\s*[:#-]?\s*(\d+)", compact, re.IGNORECASE)
+    if case_match:
+        total_cases = int(case_match.group(1))
+
+    if not party_name:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        party_name = next((line for line in lines if len(line) > 5 and not re.search(r"invoice|tax|gst|phone|amount", line, re.I)), "")
+
     return {
-        "party": party,
-        "place": place,
-        "invoice": invoice_match.group(1) if invoice_match else "",
-        "billDate": bill_date,
-        "cases": int(cases_match.group(1)) if cases_match else 0,
-        "mode": mode,
-        "transporter": transporter,
-        "totalAmount": total_amount,
-        "freightAmount": float(freight_match.group(1).replace(",", "")) if freight_match else None,
-        "items": items,
-        "rawTextPreview": text[:1200],
+        "invoiceNumber": invoice_number,
+        "invoiceDate": invoice_date,
+        "partyName": party_name[:80],
+        "partyCity": party_city[:40],
+        "orderCaseCount": total_cases,
+        "invoiceAmount": float(amount.replace(",", "")) if amount else None,
+        "freightAmount": float(freight.replace(",", "")) if freight else None,
+        "billItems": item_rows[:80],
+        "rawTextPreview": text[:1500],
+        "transportHint": "Transport" in upper or "LR" in upper or "BILTY" in upper,
     }
 
 
-def log_action(
-    conn: sqlite3.Connection,
-    job_id: str | None,
-    user: sqlite3.Row | dict | None,
-    action_type: str,
-    old_status: str | None = None,
-    new_status: str | None = None,
-    remarks: str = "",
-    metadata: dict | None = None,
-    created_at: str | None = None,
-) -> None:
-    user_id = user["id"] if user else None
-    user_role = user["role"] if user else None
+def serialize_user(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "emailOrMobile": row["email_or_mobile"],
+        "role": row["role"],
+        "activeStatus": bool(row["active_status"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def calculate_hisaab(job: dict, partners: list[dict]) -> dict:
+    partner_name = job.get("deliveryPartnerName") or job.get("delivery_partner_name") or ""
+    partner = next((item for item in partners if item.get("name") == partner_name), {})
+    cost_per_package = float(partner.get("costPerPackage") or partner.get("cost_per_package") or 10)
+    cost_per_bora = float(partner.get("costPerBora") or partner.get("cost_per_bora") or 40)
+    munshiyana = float(partner.get("munshiyanaPerTransport") or partner.get("munshiyana_per_transport") or 20)
+    packing_lines = job.get("packingDetails", {}).get("packingBreakup", []) if isinstance(job.get("packingDetails"), dict) else []
+    bora_count = sum(int(line.get("packageCount") or 0) for line in packing_lines if str(line.get("packageType") or "").lower() == "bora")
+    total_packages = int(job.get("totalPackages") or 0)
+    non_bora_packages = max(0, total_packages - bora_count)
+    package_cost = non_bora_packages * cost_per_package
+    bora_cost = bora_count * cost_per_bora
+    transport_fee = munshiyana if str(job.get("transportMode") or "").lower() == "transport" else 0
+    return {
+        "deliveryPartnerName": partner_name,
+        "partyName": job.get("partyName") or job.get("party_name"),
+        "transportName": job.get("transportName") or job.get("transport_name") or "",
+        "totalPackages": total_packages,
+        "boraCount": bora_count,
+        "packageCost": package_cost,
+        "boraCost": bora_cost,
+        "munshiyana": transport_fee,
+        "totalCost": package_cost + bora_cost + transport_fee,
+    }
+
+
+def serialize_job(row: sqlite3.Row, conn: sqlite3.Connection | None = None) -> dict:
+    job = {
+        "id": row["id"],
+        "dailyEntryNo": row["daily_entry_no"],
+        "dispatchDate": row["dispatch_date"],
+        "partyName": row["party_name"],
+        "partyCity": row["party_city"] or row["place"],
+        "partyMobileNumber": row["party_mobile_number"] or "",
+        "place": row["place"],
+        "invoiceNumber": row["invoice_number"] or "",
+        "billDate": row["bill_date"],
+        "invoiceDate": row["bill_date"],
+        "billFileUrl": row["bill_file_url"],
+        "extractedBillData": json_loads(row["extracted_bill_data_json"], {}),
+        "orderCaseCount": row["total_cases"],
+        "totalCases": row["total_cases"],
+        "totalAmount": row["total_amount"],
+        "invoiceAmount": row["total_amount"],
+        "billItems": json_loads(row["bill_items_json"], []),
+        "totalPackages": row["total_packages"],
+        "totalPackedCases": row["total_packed_cases"],
+        "currentStatus": row["current_status"],
+        "priority": row["priority"],
+        "uploadedBy": row["uploaded_by"],
+        "dispatcherId": row["dispatcher_id"],
+        "reviewerId": row["reviewer_id"],
+        "deliveryPartnerName": row["delivery_partner_name"] or row["transporter_delivery_partner_name"] or "",
+        "transporterDeliveryPartnerName": row["transporter_delivery_partner_name"] or "",
+        "transportMode": row["transport_mode"] or "",
+        "transportName": row["transport_name"] or "",
+        "deliveryRoute": row["delivery_route"] or "",
+        "routeSequence": row["route_sequence"],
+        "routeBatchId": row["route_batch_id"],
+        "packageCountDifference": row["package_count_difference"],
+        "packageDifferenceReason": row["package_difference_reason"] or "",
+        "packageDifferenceNote": row["package_difference_note"] or "",
+        "shortageReason": row["shortage_reason"] or "",
+        "shortageNote": row["shortage_note"] or "",
+        "shortageItems": json_loads(row["shortage_items_json"], []),
+        "dispatcherNote": row["dispatcher_note"] or "",
+        "reviewerNote": row["reviewer_note"] or "",
+        "adminNote": row["admin_note"] or "",
+        "adminOverrideBy": row["admin_override_by"] or "",
+        "optionalReferenceNumber": row["optional_reference_number"] or "",
+        "biltyPhotoUrl": row["bilty_photo_url"] or "",
+        "biltyPackageCount": row["bilty_package_count"],
+        "biltyDate": row["bilty_date"] or "",
+        "biltyValue": row["bilty_value"],
+        "freightAmount": row["freight_amount"],
+        "whatsappSentStatus": row["whatsapp_sent_status"] or "not_ready",
+        "aiCheckStatus": row["ai_check_status"] or "not_checked",
+        "aiPhotoQualityScore": row["ai_photo_quality_score"],
+        "aiMatchScore": row["ai_match_score"],
+        "aiRiskLevel": row["ai_risk_level"],
+        "aiSummary": row["ai_summary"],
+        "timestamps": {
+            "billUploadedAt": row["bill_uploaded_at"],
+            "jobClaimedAt": row["job_claimed_at"],
+            "packingStartedAt": row["packing_started_at"],
+            "productPhotoUploadedAt": row["product_photo_uploaded_at"],
+            "submittedForReviewAt": row["submitted_for_review_at"],
+            "reviewedAt": row["reviewed_at"],
+            "correctionSentAt": row["correction_sent_at"],
+            "correctionResubmittedAt": row["correction_resubmitted_at"],
+            "reviewerApprovedAt": row["reviewer_approved_at"],
+            "dispatchedAt": row["dispatched_at"],
+            "deliveredAt": row["delivered_at"],
+            "completedAt": row["completed_at"],
+        },
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "packingDetails": {"packingBreakup": [], "packingPhotos": [], "dispatcherNote": row["dispatcher_note"] or ""},
+        "goodsCheck": {"photos": []},
+        "biltyDetails": {"biltyPhotoUrl": row["bilty_photo_url"] or "", "optionalReferenceNumber": row["optional_reference_number"] or ""},
+    }
+
+    if conn:
+        packing_rows = conn.execute(
+            "SELECT * FROM packing_breakup WHERE dispatch_job_id = ? ORDER BY created_at, id",
+            (row["id"],),
+        ).fetchall()
+        job["packingDetails"]["packingBreakup"] = [
+            {
+                "id": item["id"],
+                "packageType": item["packing_type"],
+                "packageCount": item["no_of_packages"],
+                "casesPerPackage": item["cases_per_package"],
+                "totalCases": item["total_cases"],
+            }
+            for item in packing_rows
+        ]
+        photo_rows = conn.execute(
+            "SELECT * FROM photos WHERE dispatch_job_id = ? ORDER BY created_at",
+            (row["id"],),
+        ).fetchall()
+        job["packingDetails"]["packingPhotos"] = [
+            {"id": item["id"], "fileUrl": item["file_url"], "photoType": item["photo_type"], "createdAt": item["created_at"]}
+            for item in photo_rows
+            if item["photo_type"] in {"packing", "pre-dispatch", "final-packing", "product-photo"}
+        ]
+        job["goodsCheck"] = {
+            "photos": [
+                {"id": item["id"], "fileUrl": item["file_url"], "photoType": item["photo_type"], "createdAt": item["created_at"]}
+                for item in photo_rows
+                if item["photo_type"] == "goods-check"
+            ]
+        }
+    return job
+
+
+def bootstrap_payload(user: sqlite3.Row) -> dict:
+    with db_connect() as conn:
+        if user["role"] == "dispatcher":
+            rows = conn.execute(
+                """
+                SELECT * FROM dispatch_jobs
+                WHERE current_status = 'ready'
+                   OR dispatcher_id = ?
+                ORDER BY dispatch_date DESC, COALESCE(daily_entry_no, 999999), created_at DESC
+                """,
+                (user["id"],),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM dispatch_jobs ORDER BY dispatch_date DESC, COALESCE(daily_entry_no, 999999), created_at DESC").fetchall()
+        jobs = [serialize_job(row, conn) for row in rows]
+        payload = {"user": serialize_user(user), "jobs": jobs, "metrics": calculate_metrics(jobs)}
+        if user["role"] in {"admin", "reviewer"}:
+            payload["logs"] = [dict(item) for item in conn.execute("SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 300")]
+            payload["routes"] = [dict(item) for item in conn.execute("SELECT * FROM route_names ORDER BY id")]
+            payload["routeBatches"] = [dict(item) for item in conn.execute("SELECT * FROM route_batches ORDER BY created_at DESC")]
+            payload["deliveryPartners"] = [serialize_partner(item) for item in conn.execute("SELECT * FROM delivery_partners ORDER BY name")]
+            payload["transports"] = [serialize_transport(item) for item in conn.execute("SELECT * FROM transports ORDER BY name")]
+        if user["role"] == "admin":
+            payload["users"] = [serialize_user(item) for item in conn.execute("SELECT * FROM users ORDER BY role, name")]
+            payload["reports"] = calculate_reports(jobs, payload.get("logs", []), payload.get("deliveryPartners", []))
+            payload["settings"] = {item["key"]: item["value"] for item in conn.execute("SELECT * FROM app_settings")}
+        return payload
+
+
+def calculate_metrics(jobs: list[dict]) -> dict:
+    today = datetime.now().date().isoformat()
+    return {
+        "totalJobs": len(jobs),
+        "readyJobs": sum(job["currentStatus"] == "ready" for job in jobs),
+        "activeDispatchJobs": sum(job["currentStatus"] in {"assigned", "packing", "product-photo-uploaded"} for job in jobs),
+        "submittedForReview": sum(job["currentStatus"] == "submitted-for-review" for job in jobs),
+        "needsCorrection": sum(job["currentStatus"] == "needs-correction" for job in jobs),
+        "approved": sum(job["currentStatus"] in {"approved-by-reviewer", "dispatch-pending"} for job in jobs),
+        "dispatchedToday": sum(job["currentStatus"] == "dispatched" and (job["timestamps"].get("dispatchedAt") or "").startswith(today) for job in jobs),
+        "deliveredToday": sum(job["currentStatus"] in {"delivered", "completed"} and (job["timestamps"].get("deliveredAt") or job["timestamps"].get("completedAt") or "").startswith(today) for job in jobs),
+        "completedToday": sum(job["currentStatus"] == "completed" and (job["timestamps"].get("completedAt") or "").startswith(today) for job in jobs),
+        "delayedJobs": sum(job["currentStatus"] not in {"completed", "cancelled"} and job.get("dispatchDate", today) < today for job in jobs),
+    }
+
+
+def hours_between(start: str | None, end: str | None) -> float | None:
+    if not start or not end:
+        return None
+    try:
+        return round((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds() / 3600, 2)
+    except ValueError:
+        return None
+
+
+def calculate_reports(jobs: list[dict], logs: list[dict], partners: list[dict] | None = None) -> dict:
+    partners = partners or []
+    by_dispatcher = {}
+    by_reviewer = {}
+    by_transport = {}
+    by_route = {}
+    by_partner = {}
+    shortage = []
+    difference = []
+    hisaab_rows = []
+    for job in jobs:
+        dispatcher = job.get("dispatcherId") or "Unassigned"
+        reviewer = job.get("reviewerId") or "Unreviewed"
+        by_dispatcher.setdefault(dispatcher, {"jobs": 0, "completed": 0, "corrections": 0, "hours": []})
+        by_dispatcher[dispatcher]["jobs"] += 1
+        by_dispatcher[dispatcher]["completed"] += int(job["currentStatus"] == "completed")
+        if job["currentStatus"] == "needs-correction" or job.get("shortageItems"):
+            by_dispatcher[dispatcher]["corrections"] += 1
+        work_hours = hours_between(job["timestamps"].get("jobClaimedAt"), job["timestamps"].get("submittedForReviewAt"))
+        if work_hours is not None:
+            by_dispatcher[dispatcher]["hours"].append(work_hours)
+
+        by_reviewer.setdefault(reviewer, {"jobs": 0, "approved": 0, "hours": []})
+        by_reviewer[reviewer]["jobs"] += 1
+        by_reviewer[reviewer]["approved"] += int(job["currentStatus"] in {"approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"})
+        review_hours = hours_between(job["timestamps"].get("submittedForReviewAt"), job["timestamps"].get("reviewerApprovedAt"))
+        if review_hours is not None:
+            by_reviewer[reviewer]["hours"].append(review_hours)
+
+        transport = job.get("transportName") or "Not set"
+        route = job.get("deliveryRoute") or "Not set"
+        partner = job.get("deliveryPartnerName") or "Not set"
+        by_transport[transport] = by_transport.get(transport, 0) + 1
+        by_route[route] = by_route.get(route, 0) + 1
+        by_partner[partner] = by_partner.get(partner, 0) + 1
+        if job.get("shortageItems") or job.get("shortageReason"):
+            shortage.append(job)
+        if job.get("packageDifferenceReason"):
+            difference.append(job)
+        if job.get("currentStatus") in {"dispatched", "delivered", "completed"}:
+            hisaab_rows.append(calculate_hisaab(job, partners))
+
+    def average(values):
+        return round(sum(values) / len(values), 2) if values else 0
+
+    return {
+        "dispatcherProductivity": [
+            {"name": key, **{k: v for k, v in value.items() if k != "hours"}, "avgHours": average(value["hours"])} for key, value in by_dispatcher.items()
+        ],
+        "reviewerProductivity": [
+            {"name": key, **{k: v for k, v in value.items() if k != "hours"}, "avgHours": average(value["hours"])} for key, value in by_reviewer.items()
+        ],
+        "transportReport": by_transport,
+        "routeReport": by_route,
+        "deliveryPartnerReport": by_partner,
+        "shortageReport": shortage,
+        "packageDifferenceReport": difference,
+        "hisaabReport": hisaab_rows,
+        "dailySummary": calculate_metrics(jobs),
+    }
+
+
+def status_label(status: str) -> str:
+    labels = {
+        "ready": "Ready",
+        "assigned": "Assigned",
+        "goods-photo-uploaded": "Goods Photo Uploaded",
+        "goods-submitted-for-review": "Goods Submitted for Review",
+        "goods-needs-correction": "Goods Needs Correction",
+        "goods-approved": "Goods Approved",
+        "packing": "Packing",
+        "product-photo-uploaded": "Product Photo Uploaded",
+        "submitted-for-review": "Submitted for Review",
+        "needs-correction": "Needs Correction",
+        "approved-by-reviewer": "Approved",
+        "dispatch-pending": "Dispatch Pending",
+        "dispatched": "Dispatched",
+        "delivered": "Delivered",
+        "completed": "Completed",
+        "cancelled": "Cancelled",
+    }
+    return labels.get(status, status.title())
+
+
+def log_activity(conn: sqlite3.Connection, user: sqlite3.Row | None, job_id: str | None, action_type: str, old_status: str | None = None, new_status: str | None = None, remarks: str = "", metadata: dict | None = None) -> None:
     conn.execute(
         """
-        INSERT INTO activity_logs
-        (id, dispatch_job_id, user_id, user_role, action_type, old_status, new_status, remarks, metadata_json, created_at)
+        INSERT INTO activity_logs (id, dispatch_job_id, user_id, user_role, action_type, old_status, new_status, remarks, metadata_json, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(uuid.uuid4()),
             job_id,
-            user_id,
-            user_role,
+            user["id"] if user else None,
+            user["role"] if user else None,
             action_type,
             old_status,
             new_status,
             remarks,
-            json.dumps(metadata or {}),
-            created_at or now_iso(),
+            json.dumps(metadata or {}, ensure_ascii=False),
+            now_iso(),
         ),
     )
 
 
-def legacy_status(status: str) -> str:
-    return {
-        "approved": "approved-by-reviewer",
-        "packing-done": "packing",
-        "bilty-pending": "dispatch-pending",
-    }.get(status, status if status in STATUSES else "ready")
+def save_upload(file_item, target_dir: Path) -> str:
+    file_name = Path(file_item.filename or "upload.bin").name
+    extension = Path(file_name).suffix.lower() or ".bin"
+    safe_name = f"{uuid.uuid4()}{extension}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / safe_name
+    data = file_item.file.read()
+    if len(data) > MAX_FILE_SIZE:
+        raise ValueError("File too large. Upload a smaller file.")
+    target_path.write_bytes(data)
+    return f"/uploads/{target_dir.name}/{safe_name}"
 
 
-def migrate_legacy_json_if_needed() -> None:
-    if not LEGACY_JSON_PATH.exists():
-        return
-    with db_connect() as conn:
-        existing_jobs = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0]
-        if existing_jobs:
-            return
-        legacy = json.loads(LEGACY_JSON_PATH.read_text(encoding="utf-8"))
-        users = legacy.get("users", [])
-        now = now_iso()
-        for user in users:
-            exists = conn.execute("SELECT 1 FROM users WHERE id = ?", (user["id"],)).fetchone()
-            if not exists:
-                conn.execute(
-                    """
-                    INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                    """,
-                    (
-                        user["id"],
-                        user["name"],
-                        user["id"],
-                        hash_password("changeme123"),
-                        user["role"],
-                        now,
-                        now,
-                    ),
-                )
-
-        for job in legacy.get("dispatches", []):
-            created_at = job.get("createdAt") or now
-            updated_at = job.get("updatedAt") or created_at
-            status = legacy_status(job.get("status", "ready"))
-            reviewer_id = next(
-                (
-                    entry.get("actorId")
-                    for entry in job.get("auditLog", [])
-                    if str(entry.get("actorId", "")).startswith("reviewer")
-                ),
-                None,
-            )
-            conn.execute(
-                """
-                INSERT INTO dispatch_jobs (
-                    id, invoice_number, party_name, place, bill_date, bill_file_url, extracted_bill_data_json,
-                    total_cases, total_amount, current_status, priority, uploaded_by, dispatcher_id, reviewer_id,
-                    transporter_delivery_partner_name, bill_uploaded_at, job_claimed_at, packing_started_at,
-                    product_photo_uploaded_at, submitted_for_review_at, reviewed_at, correction_sent_at,
-                    correction_resubmitted_at, reviewer_approved_at, bilty_uploaded_at, dispatched_at, delivered_at,
-                    correction_count, admin_override_by, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'normal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    job["id"],
-                    job.get("invoice", ""),
-                    job.get("party", ""),
-                    job.get("place", ""),
-                    job.get("billDate", ""),
-                    job.get("billFileUrl", ""),
-                    json.dumps({}),
-                    int(job.get("cases", 0)),
-                    None,
-                    status,
-                    reviewer_id or "reviewer-1",
-                    job.get("assignee") or None,
-                    reviewer_id,
-                    job.get("transporter", ""),
-                    created_at,
-                    created_at if job.get("assignee") else None,
-                    created_at if job.get("packing") else None,
-                    created_at if job.get("productPhotoUrl") else None,
-                    created_at if status in {"submitted-for-review", "approved-by-reviewer", "delivered"} else None,
-                    created_at if reviewer_id else None,
-                    None,
-                    None,
-                    updated_at if status in {"approved-by-reviewer", "delivered"} else None,
-                    updated_at if job.get("biltyPhotoUrl") else None,
-                    updated_at if status in {"dispatched", "delivered"} else None,
-                    updated_at if status == "delivered" else None,
-                    0,
-                    None,
-                    created_at,
-                    updated_at,
-                ),
-            )
-            packing = job.get("packing") or empty_packing()
-            conn.execute(
-                """
-                INSERT INTO packing_details
-                (id, dispatch_job_id, packing_breakup_json, number_of_boxes, number_of_cases, dispatcher_note,
-                 product_photo_url, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    job["id"],
-                    json.dumps(packing),
-                    sum(int(value or 0) for value in packing.values()),
-                    int(job.get("cases", 0)),
-                    job.get("dispatcherNote", ""),
-                    job.get("productPhotoUrl", ""),
-                    job.get("assignee") or None,
-                    created_at,
-                    updated_at,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO review_details
-                (id, dispatch_job_id, reviewer_id, review_decision, reviewer_note,
-                 transporter_delivery_partner_name, reviewed_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    job["id"],
-                    reviewer_id,
-                    "approved" if status in {"approved-by-reviewer", "delivered"} else None,
-                    job.get("reviewerNote", ""),
-                    job.get("transporter", ""),
-                    updated_at if reviewer_id else None,
-                    created_at,
-                    updated_at,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO bilty_details
-                (id, dispatch_job_id, bilty_number, bilty_photo_url, delivery_partner_name,
-                 bilty_uploaded_by, bilty_uploaded_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    job["id"],
-                    job.get("biltyNumber", ""),
-                    job.get("biltyPhotoUrl", ""),
-                    job.get("transporter", ""),
-                    job.get("assignee") or None,
-                    updated_at if job.get("biltyPhotoUrl") else None,
-                    created_at,
-                    updated_at,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO ai_photo_checks
-                (id, dispatch_job_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (str(uuid.uuid4()), job["id"], created_at, updated_at),
-            )
-            for entry in reversed(job.get("auditLog", [])):
-                changes = entry.get("changes", {})
-                status_change = changes.get("status", {})
-                actor_id = entry.get("actorId")
-                actor = conn.execute("SELECT * FROM users WHERE id = ?", (actor_id,)).fetchone()
-                log_action(
-                    conn,
-                    job["id"],
-                    actor,
-                    entry.get("action", "legacy_update"),
-                    legacy_status(status_change.get("from")) if status_change.get("from") else None,
-                    legacy_status(status_change.get("to")) if status_change.get("to") else None,
-                    "",
-                    {"legacy_changes": changes},
-                    entry.get("timestamp") or created_at,
-                )
-
-
-def get_user(conn: sqlite3.Connection, user_id: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-
-
-def session_user(handler: BaseHTTPRequestHandler) -> sqlite3.Row | None:
-    cookie = SimpleCookie(handler.headers.get("Cookie", ""))
-    token = cookie.get("dispatch_session")
-    if not token:
-        return None
-    with db_connect() as conn:
-        row = conn.execute(
-            """
-            SELECT u.* FROM auth_sessions s
-            JOIN users u ON u.id = s.user_id
-            WHERE s.token = ? AND s.expires_at > ?
-            """,
-            (token.value, now_iso()),
-        ).fetchone()
-        return row
-
-
-def serialize_user(user: sqlite3.Row) -> dict:
-    return {
-        "id": user["id"],
-        "name": user["name"],
-        "emailOrMobile": user["email_or_mobile"],
-        "role": user["role"],
-        "activeStatus": bool(user["active_status"]),
-    }
-
-
-def load_json(value: str | None, default):
-    if not value:
-        return default
+def read_json_body(handler: BaseHTTPRequestHandler) -> dict:
+    length = int(handler.headers.get("Content-Length", "0"))
+    if not length:
+        return {}
+    data = handler.rfile.read(length)
     try:
-        return json.loads(value)
+        return json.loads(data.decode("utf-8"))
     except json.JSONDecodeError:
-        return default
+        return {}
 
 
-def serialize_job(conn: sqlite3.Connection, job_id: str) -> dict:
-    job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
-    packing = conn.execute("SELECT * FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-    review = conn.execute("SELECT * FROM review_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-    bilty = conn.execute("SELECT * FROM bilty_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-    ai = conn.execute("SELECT * FROM ai_photo_checks WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-    logs = conn.execute(
-        """
-        SELECT l.*, u.name AS user_name
-        FROM activity_logs l
-        LEFT JOIN users u ON u.id = l.user_id
-        WHERE l.dispatch_job_id = ?
-        ORDER BY l.created_at DESC
-        """,
-        (job_id,),
-    ).fetchall()
-    packing_rows = conn.execute(
-        """
-        SELECT packing_type, no_of_packages, cases_per_package, total_cases
-        FROM packing_breakup
-        WHERE dispatch_job_id = ?
-        ORDER BY created_at, id
-        """,
-        (job_id,),
-    ).fetchall()
-    packing_json = [
-        {
-            "packageType": row["packing_type"],
-            "packageCount": row["no_of_packages"],
-            "casesPerPackage": row["cases_per_package"],
-            "totalCases": row["total_cases"],
-        }
-        for row in packing_rows
-    ] or normalize_packing_lines(load_json(packing["packing_breakup_json"] if packing else None, empty_packing()))
-    packing_photos = [
-        {"photoType": row["photo_type"], "fileUrl": row["file_url"], "createdAt": row["created_at"]}
-        for row in conn.execute(
-            """
-            SELECT photo_type, file_url, created_at
-            FROM photos
-            WHERE dispatch_job_id = ? AND photo_type IN ('pre-dispatch', 'final-packing')
-            ORDER BY created_at
-            """,
-            (job_id,),
-        ).fetchall()
-    ]
-    if not packing_photos:
-        packing_photos = [
-            {"photoType": "final-packing", "fileUrl": url, "createdAt": None}
-            for url in load_json(packing["packing_photo_urls_json"] if packing else None, [])
-        ]
-    goods_check_photos = [
-        {"photoType": row["photo_type"], "fileUrl": row["file_url"], "createdAt": row["created_at"]}
-        for row in conn.execute(
-            """
-            SELECT photo_type, file_url, created_at
-            FROM photos
-            WHERE dispatch_job_id = ? AND photo_type = 'goods-check'
-            ORDER BY created_at
-            """,
-            (job_id,),
-        ).fetchall()
-    ]
-    totals = packing_totals(packing_json)
-    return {
-        "id": job["id"],
-        "dailyEntryNo": job["daily_entry_no"],
-        "dispatchDate": job["dispatch_date"] or date_part(job["created_at"]),
-        "invoiceNumber": job["invoice_number"] or "",
-        "partyName": job["party_name"],
-        "partyCity": job["party_city"] or job["place"],
-        "partyMobileNumber": job["party_mobile_number"] or "",
-        "place": job["place"],
-        "billDate": job["bill_date"] or "",
-        "invoiceDate": job["bill_date"] or "",
-        "billFileUrl": job["bill_file_url"] or "",
-        "extractedBillData": load_json(job["extracted_bill_data_json"], {}),
-        "billItems": load_json(job["bill_items_json"], []),
-        "totalCases": job["total_cases"],
-        "orderCaseCount": job["total_cases"],
-        "totalPackages": job["total_packages"] or totals["totalPackages"],
-        "totalPackedCases": job["total_packed_cases"] or totals["totalPackedCases"],
-        "totalAmount": job["total_amount"],
-        "invoiceAmount": job["total_amount"],
-        "currentStatus": job["current_status"],
-        "priority": job["priority"],
-        "uploadedBy": job["uploaded_by"],
-        "dispatcherId": job["dispatcher_id"],
-        "reviewerId": job["reviewer_id"],
-        "transporterDeliveryPartnerName": job["transporter_delivery_partner_name"] or "",
-        "deliveryPartnerName": job["delivery_partner_name"] or "",
-        "transportMode": job["transport_mode"] or "",
-        "transportName": job["transport_name"] or "",
-        "deliveryRoute": job["delivery_route"] or "",
-        "routeSequence": job["route_sequence"],
-        "routeBatchId": job["route_batch_id"],
-        "packageCountDifference": job["package_count_difference"],
-        "packageDifferenceReason": job["package_difference_reason"] or "",
-        "packageDifferenceNote": job["package_difference_note"] or "",
-        "shortageReason": job["shortage_reason"] or "",
-        "shortageNote": job["shortage_note"] or "",
-        "shortageItems": load_json(job["shortage_items_json"], []),
-        "dispatcherNote": job["dispatcher_note"] or "",
-        "reviewerNote": job["reviewer_note"] or "",
-        "adminNote": job["admin_note"] or "",
-        "adminOverrideBy": job["admin_override_by"] or "",
-        "whatsapp": {
-            "templateName": job["whatsapp_template_name"],
-            "sentStatus": job["whatsapp_sent_status"],
-            "sentAt": job["whatsapp_sent_at"],
-            "messageId": job["whatsapp_message_id"],
-            "failedReason": job["whatsapp_failed_reason"],
-        },
-        "timestamps": {
-            "billUploadedAt": job["bill_uploaded_at"],
-            "jobClaimedAt": job["job_claimed_at"],
-            "goodsPhotoUploadedAt": job["goods_photo_uploaded_at"],
-            "goodsSubmittedForReviewAt": job["goods_submitted_for_review_at"],
-            "goodsReviewedAt": job["goods_reviewed_at"],
-            "goodsApprovedAt": job["goods_approved_at"],
-            "packingStartedAt": job["packing_started_at"],
-            "productPhotoUploadedAt": job["product_photo_uploaded_at"],
-            "submittedForReviewAt": job["submitted_for_review_at"],
-            "reviewedAt": job["reviewed_at"],
-            "correctionSentAt": job["correction_sent_at"],
-            "correctionResubmittedAt": job["correction_resubmitted_at"],
-            "reviewerApprovedAt": job["reviewer_approved_at"],
-            "biltyUploadedAt": job["bilty_uploaded_at"],
-            "dispatchedAt": job["dispatched_at"],
-            "deliveredAt": job["delivered_at"],
-            "completedAt": job["completed_at"],
-        },
-        "correctionCount": job["correction_count"],
-        "packingDetails": {
-            "packingBreakup": packing_json,
-            "packingSummary": packing_summary(packing_json),
-            "packingType": packing["packing_type"] if packing else "",
-            "totalPackages": job["total_packages"] or totals["totalPackages"],
-            "totalPackedCases": job["total_packed_cases"] or totals["totalPackedCases"],
-            "packingPhotos": packing_photos,
-            "packingPhotoUrls": [photo["fileUrl"] for photo in packing_photos],
-            "packingPhotoUrl": packing_photos[-1]["fileUrl"] if packing_photos else packing["product_photo_url"] if packing else "",
-            "numberOfBoxes": packing["number_of_boxes"] if packing else 0,
-            "numberOfCases": packing["number_of_cases"] if packing else job["total_cases"],
-            "dispatcherNote": packing["dispatcher_note"] if packing else "",
-            "productPhotoUrl": packing["product_photo_url"] if packing else "",
-        },
-        "goodsCheck": {
-            "photos": goods_check_photos,
-            "photoUrls": [photo["fileUrl"] for photo in goods_check_photos],
-            "reviewerNote": job["goods_reviewer_note"] or "",
-        },
-        "reviewDetails": {
-            "reviewDecision": review["review_decision"] if review else None,
-            "reviewerNote": review["reviewer_note"] if review else "",
-            "reviewerId": review["reviewer_id"] if review else None,
-            "reviewedAt": review["reviewed_at"] if review else None,
-        },
-        "biltyDetails": {
-            "biltyNumber": bilty["bilty_number"] if bilty else "",
-            "optionalReferenceNumber": bilty["optional_reference_number"] if bilty else "",
-            "biltyPhotoUrl": bilty["bilty_photo_url"] if bilty else "",
-            "deliveryPartnerName": bilty["delivery_partner_name"] if bilty else "",
-            "biltyDate": bilty["bilty_date"] if bilty else "",
-            "biltyPackageCount": bilty["bilty_package_count"] if bilty else None,
-            "biltyValue": bilty["bilty_value"] if bilty else None,
-            "freightAmount": bilty["freight_amount"] if bilty else None,
-            "biltyUploadedAt": bilty["bilty_uploaded_at"] if bilty else None,
-        },
-        "aiPhotoCheck": {
-            "aiCheckStatus": ai["ai_check_status"] if ai else None,
-            "aiMatchScore": ai["ai_match_score"] if ai else None,
-            "aiRiskLevel": ai["ai_risk_level"] if ai else None,
-            "aiDetectedBoxCount": ai["ai_detected_box_count"] if ai else None,
-            "aiDetectedPartyMarking": ai["ai_detected_party_marking"] if ai else None,
-            "aiDetectedPackageCount": ai["ai_detected_package_count"] if ai else None,
-            "aiDetectedBiltyNumber": ai["ai_detected_bilty_number"] if ai else None,
-            "aiDetectedBiltyTransportName": ai["ai_detected_bilty_transport_name"] if ai else None,
-            "aiDetectedBiltyPackageCount": ai["ai_detected_bilty_package_count"] if ai else None,
-            "aiDetectedBiltyDate": ai["ai_detected_bilty_date"] if ai else None,
-            "aiDetectedItems": load_json(ai["ai_detected_items_json"] if ai else None, None),
-            "aiMissingItems": load_json(ai["ai_missing_items_json"] if ai else None, None),
-            "aiExtraItems": load_json(ai["ai_extra_items_json"] if ai else None, None),
-            "aiQuantityMismatch": load_json(ai["ai_quantity_mismatch_json"] if ai else None, None),
-            "aiPhotoQualityScore": ai["ai_photo_quality_score"] if ai else None,
-            "aiSummary": ai["ai_summary"] if ai else None,
-            "aiCheckedAt": ai["ai_checked_at"] if ai else None,
-            "aiModelVersion": ai["ai_model_version"] if ai else None,
-        },
-        "createdAt": job["created_at"],
-        "updatedAt": job["updated_at"],
-        "activityLogs": [
-            {
-                "id": item["id"],
-                "userId": item["user_id"],
-                "userRole": item["user_role"],
-                "userName": item["user_name"] or "System",
-                "actionType": item["action_type"],
-                "oldStatus": item["old_status"],
-                "newStatus": item["new_status"],
-                "remarks": item["remarks"] or "",
-                "metadata": load_json(item["metadata_json"], {}),
-                "createdAt": item["created_at"],
-            }
-            for item in logs
-        ],
-    }
-
-
-def serialize_job_for_user(conn: sqlite3.Connection, job_id: str, user: sqlite3.Row) -> dict:
-    payload = serialize_job(conn, job_id)
-    if user["role"] == "dispatcher":
-        payload["activityLogs"] = []
-    return payload
-
-
-def accessible_job_ids(conn: sqlite3.Connection, user: sqlite3.Row) -> list[str]:
-    if user["role"] == "admin":
-        rows = conn.execute("SELECT id FROM dispatch_jobs ORDER BY created_at DESC").fetchall()
-    elif user["role"] == "reviewer":
-        rows = conn.execute("SELECT id FROM dispatch_jobs ORDER BY created_at DESC").fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT id FROM dispatch_jobs
-            WHERE current_status = 'ready' OR dispatcher_id = ?
-            ORDER BY created_at DESC
-            """,
-            (user["id"],),
-        ).fetchall()
-    return [row["id"] for row in rows]
-
-
-def date_part(value: str | None) -> str:
-    return value[:10] if value else ""
-
-
-def minutes_between(start: str | None, end: str | None) -> float | None:
-    if not start or not end:
+def parse_multipart(handler: BaseHTTPRequestHandler):
+    content_type = handler.headers.get("Content-Type", "")
+    if not content_type.startswith("multipart/form-data"):
         return None
-    return round((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds() / 60, 1)
-
-
-def reviewer_metrics(conn: sqlite3.Connection) -> dict:
-    today = datetime.now(timezone.utc).date().isoformat()
-    jobs = conn.execute("SELECT * FROM dispatch_jobs").fetchall()
-    review_times = [
-        minutes_between(job["submitted_for_review_at"], job["reviewer_approved_at"])
-        for job in jobs
-        if job["reviewer_approved_at"]
-    ]
-    review_times = [item for item in review_times if item is not None]
-    return {
-        "pendingChecking": sum(job["current_status"] == "submitted-for-review" for job in jobs),
-        "approvedToday": sum(date_part(job["reviewer_approved_at"]) == today for job in jobs),
-        "sentBackToday": sum(date_part(job["correction_sent_at"]) == today for job in jobs),
-        "rejectedCancelled": sum(job["current_status"] == "cancelled" for job in jobs),
-        "averageCheckingMinutes": round(sum(review_times) / len(review_times), 1) if review_times else 0,
-        "oldPendingCases": sum(
-            job["current_status"] == "submitted-for-review"
-            and minutes_between(job["submitted_for_review_at"], now_iso()) not in (None,)
-            and minutes_between(job["submitted_for_review_at"], now_iso()) > 120
-            for job in jobs
-        ),
+    environ = {
+        "REQUEST_METHOD": "POST",
+        "CONTENT_TYPE": content_type,
+        "CONTENT_LENGTH": handler.headers.get("Content-Length", "0"),
     }
+    return cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ=environ)
 
 
-def dispatcher_metrics(conn: sqlite3.Connection, dispatcher_id: str) -> dict:
-    today = datetime.now(timezone.utc).date().isoformat()
-    jobs = conn.execute("SELECT * FROM dispatch_jobs").fetchall()
-    return {
-        "openJobs": sum(job["current_status"] == "ready" for job in jobs),
-        "myActiveJobs": sum(
-            job["dispatcher_id"] == dispatcher_id
-            and job["current_status"]
-            in {"assigned", "packing", "needs-correction"}
-            for job in jobs
-        ),
-        "submittedForReview": sum(
-            job["dispatcher_id"] == dispatcher_id and job["current_status"] == "submitted-for-review" for job in jobs
-        ),
-        "needsCorrection": sum(
-            job["dispatcher_id"] == dispatcher_id and job["current_status"] == "needs-correction" for job in jobs
-        ),
-        "approvedForDispatch": sum(
-            job["dispatcher_id"] == dispatcher_id
-            and job["current_status"] in {"approved-by-reviewer", "dispatch-pending"}
-            for job in jobs
-        ),
-        "deliveredToday": sum(
-            job["dispatcher_id"] == dispatcher_id and date_part(job["delivered_at"]) == today for job in jobs
-        ),
-    }
-
-
-def admin_metrics(conn: sqlite3.Connection) -> dict:
-    today = datetime.now(timezone.utc).date().isoformat()
-    jobs = conn.execute("SELECT * FROM dispatch_jobs").fetchall()
-    return {
-        "totalJobs": len(jobs),
-        "readyJobs": sum(job["current_status"] == "ready" for job in jobs),
-        "activeDispatchJobs": sum(
-            job["current_status"] in {"assigned", "packing"} for job in jobs
-        ),
-        "pendingReviewerCheck": sum(job["current_status"] == "submitted-for-review" for job in jobs),
-        "needsCorrection": sum(job["current_status"] == "needs-correction" for job in jobs),
-        "biltyPending": sum(job["current_status"] in {"approved-by-reviewer", "dispatch-pending"} for job in jobs),
-        "dispatchedToday": sum(date_part(job["dispatched_at"]) == today for job in jobs),
-        "deliveredToday": sum(date_part(job["delivered_at"]) == today for job in jobs),
-        "delayedJobs": sum(
-            job["current_status"] not in {"delivered", "cancelled"}
-            and minutes_between(job["created_at"], now_iso()) not in (None,)
-            and minutes_between(job["created_at"], now_iso()) > 240
-            for job in jobs
-        ),
-    }
-
-
-def productivity_reports(conn: sqlite3.Connection) -> dict:
-    dispatchers = conn.execute("SELECT * FROM users WHERE role = 'dispatcher'").fetchall()
-    reviewers = conn.execute("SELECT * FROM users WHERE role = 'reviewer'").fetchall()
-    jobs = conn.execute("SELECT * FROM dispatch_jobs").fetchall()
-    dispatcher_rows = []
-    for user in dispatchers:
-        own = [job for job in jobs if job["dispatcher_id"] == user["id"]]
-        avg_work = [
-            minutes_between(job["job_claimed_at"], job["product_photo_uploaded_at"])
-            for job in own
-            if job["product_photo_uploaded_at"]
-        ]
-        avg_work = [item for item in avg_work if item is not None]
-        dispatcher_rows.append(
-            {
-                "userId": user["id"],
-                "name": user["name"],
-                "completedJobs": sum(job["current_status"] == "delivered" for job in own),
-                "corrections": sum(job["correction_count"] for job in own),
-                "averageWorkingMinutes": round(sum(avg_work) / len(avg_work), 1) if avg_work else 0,
-            }
-        )
-    reviewer_rows = []
-    for user in reviewers:
-        own = [job for job in jobs if job["reviewer_id"] == user["id"]]
-        avg_review = [
-            minutes_between(job["submitted_for_review_at"], job["reviewer_approved_at"])
-            for job in own
-            if job["reviewer_approved_at"]
-        ]
-        avg_review = [item for item in avg_review if item is not None]
-        reviewer_rows.append(
-            {
-                "userId": user["id"],
-                "name": user["name"],
-                "approvals": sum(job["reviewer_approved_at"] is not None for job in own),
-                "averageReviewMinutes": round(sum(avg_review) / len(avg_review), 1) if avg_review else 0,
-            }
-        )
-    transporter = conn.execute(
-        """
-        SELECT transport_name AS name, COUNT(*) AS total
-        FROM dispatch_jobs
-        WHERE transport_name IS NOT NULL AND transport_name != ''
-        GROUP BY transport_name
-        ORDER BY total DESC
-        """
-    ).fetchall()
-    delivery_partners = conn.execute(
-        """
-        SELECT delivery_partner_name AS name, COUNT(*) AS total
-        FROM dispatch_jobs
-        WHERE delivery_partner_name IS NOT NULL AND delivery_partner_name != ''
-        GROUP BY delivery_partner_name
-        ORDER BY total DESC
-        """
-    ).fetchall()
-    job_timings = []
-    for job in jobs:
-        dispatcher_minutes = minutes_between(job["job_claimed_at"], job["submitted_for_review_at"])
-        reviewer_minutes = minutes_between(job["submitted_for_review_at"], job["reviewer_approved_at"])
-        total_minutes = minutes_between(job["bill_uploaded_at"], job["completed_at"] or job["delivered_at"] or job["dispatched_at"])
-        job_timings.append(
-            {
-                "jobId": job["id"],
-                "dispatchDate": job["dispatch_date"],
-                "partyName": job["party_name"],
-                "partyCity": job["party_city"] or job["place"],
-                "dispatcherMinutes": dispatcher_minutes or 0,
-                "reviewerMinutes": reviewer_minutes or 0,
-                "totalMinutes": total_minutes or 0,
-                "invoiceAmount": job["total_amount"] or 0,
-                "freightAmount": conn.execute(
-                    "SELECT COALESCE(freight_amount, 0) FROM bilty_details WHERE dispatch_job_id = ?",
-                    (job["id"],),
-                ).fetchone()[0],
-                "status": job["current_status"],
-            }
-        )
-    daily_summary = []
-    for row in conn.execute(
-        """
-        SELECT dispatch_date,
-               COUNT(*) AS jobs,
-               COALESCE(SUM(total_packages), 0) AS packages,
-               COALESCE(SUM(total_packed_cases), 0) AS packed_cases,
-               COALESCE(SUM(total_amount), 0) AS invoice_amount
-        FROM dispatch_jobs
-        GROUP BY dispatch_date
-        ORDER BY dispatch_date DESC
-        """
-    ):
-        day_jobs = [item for item in job_timings if item["dispatchDate"] == row["dispatch_date"]]
-        daily_summary.append(
-            {
-                "date": row["dispatch_date"],
-                "jobs": row["jobs"],
-                "packages": row["packages"],
-                "packedCases": row["packed_cases"],
-                "invoiceAmount": row["invoice_amount"],
-                "freightAmount": round(sum(item["freightAmount"] or 0 for item in day_jobs), 2),
-                "dispatcherMinutes": round(sum(item["dispatcherMinutes"] or 0 for item in day_jobs), 1),
-                "reviewerMinutes": round(sum(item["reviewerMinutes"] or 0 for item in day_jobs), 1),
-                "totalMinutes": round(sum(item["totalMinutes"] or 0 for item in day_jobs), 1),
-            }
-        )
-    return {
-        "dispatcherWise": dispatcher_rows,
-        "reviewerWise": reviewer_rows,
-        "transporterWise": [{"name": row["name"], "total": row["total"]} for row in transporter],
-        "deliveryPartnerWise": [{"name": row["name"], "total": row["total"]} for row in delivery_partners],
-        "jobTimings": job_timings,
-        "dailySummary": daily_summary,
-    }
+def field_value(form, key: str, default=""):
+    item = form[key] if form and key in form else None
+    if item is None:
+        return default
+    if isinstance(item, list):
+        item = item[0]
+    if getattr(item, "filename", None):
+        return default
+    value = item.value
+    return value if value is not None else default
 
 
 class DispatchHandler(BaseHTTPRequestHandler):
@@ -1569,20 +1157,21 @@ class DispatchHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/logout":
             self.handle_logout()
             return
-        user = self.require_user()
+        user = self.current_user()
         if not user:
-            return
-        if parsed.path == "/api/bills/extract":
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_bill_extract(user)
+            self.send_json({"error": "Login required"}, HTTPStatus.UNAUTHORIZED)
             return
         if parsed.path == "/api/dispatches":
             self.require_roles(user, {"reviewer", "admin"}) and self.handle_create_dispatch(user)
             return
+        if parsed.path == "/api/dispatches/bulk-import":
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_bulk_import(user)
+            return
         if parsed.path == "/api/route-batches":
             self.require_roles(user, {"reviewer", "admin"}) and self.handle_create_route_batch(user)
             return
-        if parsed.path == "/api/delivery-partners":
-            self.require_roles(user, {"admin"}) and self.handle_create_delivery_partner()
+        if parsed.path == "/api/directory":
+            self.require_roles(user, {"admin"}) and self.handle_create_directory_item()
             return
         if parsed.path == "/api/users":
             self.require_roles(user, {"admin"}) and self.handle_create_user()
@@ -1591,118 +1180,96 @@ class DispatchHandler(BaseHTTPRequestHandler):
             self.require_roles(user, {"admin"}) and self.handle_backup_import(user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/claim", parsed.path):
-            self.require_roles(user, {"dispatcher"}) and self.handle_claim_dispatch(user, match.group(1))
+            self.require_roles(user, {"dispatcher"}) and self.handle_claim(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/unassign", parsed.path):
-            self.require_roles(user, {"dispatcher"}) and self.handle_unassign_dispatch(user, match.group(1))
+            self.require_roles(user, {"dispatcher", "admin"}) and self.handle_unassign(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/product-photo", parsed.path):
-            self.require_roles(user, {"dispatcher"}) and self.handle_product_photo(user, match.group(1))
+            self.require_roles(user, {"dispatcher"}) and self.handle_product_photo(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/submit-goods-review", parsed.path):
-            self.require_roles(user, {"dispatcher"}) and self.handle_submit_goods_review(user, match.group(1))
+            self.require_roles(user, {"dispatcher"}) and self.handle_submit_goods_review(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/goods-review-decision", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_goods_review_decision(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_goods_review_decision(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/closeup-photo", parsed.path):
-            self.require_roles(user, {"dispatcher"}) and self.handle_closeup_photo(user, match.group(1))
+            self.require_roles(user, {"dispatcher"}) and self.handle_product_photo(match.group(1), user, photo_type="close-up-marking")
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/submit-review", parsed.path):
-            self.require_roles(user, {"dispatcher"}) and self.handle_submit_review(user, match.group(1))
+            self.require_roles(user, {"dispatcher"}) and self.handle_submit_review(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/review-decision", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_review_decision(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_review_decision(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/bilty-photo", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_bilty_photo(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_bilty_photo(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/mark-dispatched", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_mark_dispatched(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_mark_dispatched(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/mark-delivered", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_mark_delivered(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_mark_delivered(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/mark-completed", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_mark_completed(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_mark_completed(match.group(1), user)
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_PATCH(self) -> None:
         parsed = urlparse(self.path)
-        user = self.require_user()
+        user = self.current_user()
         if not user:
-            return
-        if match := re.fullmatch(r"/api/users/([^/]+)", parsed.path):
-            self.require_roles(user, {"admin"}) and self.handle_update_user(match.group(1))
-            return
-        if match := re.fullmatch(r"/api/delivery-partners/(\d+)", parsed.path):
-            self.require_roles(user, {"admin"}) and self.handle_update_delivery_partner(int(match.group(1)))
+            self.send_json({"error": "Login required"}, HTTPStatus.UNAUTHORIZED)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/packing", parsed.path):
-            self.require_roles(user, {"dispatcher"}) and self.handle_save_packing(user, match.group(1))
+            self.require_roles(user, {"dispatcher", "admin"}) and self.handle_update_packing(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/bilty", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_save_bilty(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_update_bilty(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/reviewer-dispatch", parsed.path):
-            self.require_roles(user, {"reviewer", "admin"}) and self.handle_save_reviewer_dispatch(user, match.group(1))
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_reviewer_dispatch_update(match.group(1), user)
             return
         if match := re.fullmatch(r"/api/routes/([^/]+)", parsed.path):
             self.require_roles(user, {"admin"}) and self.handle_update_route(match.group(1))
             return
         if match := re.fullmatch(r"/api/dispatches/([^/]+)/admin", parsed.path):
-            self.require_roles(user, {"admin"}) and self.handle_admin_override(user, match.group(1))
+            self.require_roles(user, {"admin"}) and self.handle_admin_update(match.group(1), user)
             return
-        if parsed.path == "/api/settings":
-            self.require_roles(user, {"admin"}) and self.handle_update_settings()
+        if match := re.fullmatch(r"/api/users/([^/]+)", parsed.path):
+            self.require_roles(user, {"admin"}) and self.handle_update_user(match.group(1))
+            return
+        if match := re.fullmatch(r"/api/directory/([^/]+)", parsed.path):
+            self.require_roles(user, {"admin"}) and self.handle_update_directory_item(match.group(1))
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        user = self.current_user()
+        if not user:
+            self.send_json({"error": "Login required"}, HTTPStatus.UNAUTHORIZED)
+            return
+        if match := re.fullmatch(r"/api/dispatches/([^/]+)/cancel", parsed.path):
+            self.require_roles(user, {"reviewer", "admin"}) and self.handle_cancel_dispatch(match.group(1), user)
+            return
+        if match := re.fullmatch(r"/api/directory/([^/]+)", parsed.path):
+            self.require_roles(user, {"admin"}) and self.handle_delete_directory_item(match.group(1))
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def handle_api_get(self, parsed) -> None:
-        user = self.require_user()
+        user = self.current_user()
         if not user:
+            self.send_json({"error": "Login required"}, HTTPStatus.UNAUTHORIZED)
             return
         if parsed.path == "/api/me":
             self.send_json({"user": serialize_user(user)})
             return
         if parsed.path == "/api/bootstrap":
-            with db_connect() as conn:
-                jobs = [serialize_job_for_user(conn, job_id, user) for job_id in accessible_job_ids(conn, user)]
-                directory = [
-                    {"id": item["id"], "name": item["name"], "role": item["role"]}
-                    for item in conn.execute("SELECT * FROM users WHERE active_status = 1 ORDER BY role, name")
-                ]
-                payload = {
-                    "me": serialize_user(user),
-                    "jobs": jobs,
-                    "directory": directory,
-                    "settings": {item["key"]: item["value"] for item in conn.execute("SELECT key, value FROM app_settings")},
-                }
-                if user["role"] == "dispatcher":
-                    payload["metrics"] = dispatcher_metrics(conn, user["id"])
-                elif user["role"] == "reviewer":
-                    payload["metrics"] = reviewer_metrics(conn)
-                else:
-                    payload["metrics"] = admin_metrics(conn)
-                    payload["users"] = [serialize_user(item) for item in conn.execute("SELECT * FROM users ORDER BY role, name")]
-                    payload["reports"] = productivity_reports(conn)
-                if user["role"] in {"reviewer", "admin"}:
-                    payload["routes"] = [dict(item) for item in conn.execute("SELECT * FROM route_names ORDER BY id")]
-                    payload["routeBatches"] = [dict(item) for item in conn.execute("SELECT * FROM route_batches ORDER BY created_at DESC")]
-                    payload["deliveryPartners"] = [
-                        dict(item)
-                        for item in conn.execute(
-                            "SELECT id, name, preferred_transport_name, active_status FROM delivery_partners WHERE active_status = 1 ORDER BY name"
-                        )
-                    ]
-                self.send_json(payload)
-            return
-        if parsed.path == "/api/admin/reports":
-            if not self.require_roles(user, {"admin"}):
-                return
-            with db_connect() as conn:
-                self.send_json(productivity_reports(conn))
+            self.send_json(bootstrap_payload(user))
             return
         if parsed.path == "/api/bills/export":
             if not self.require_roles(user, {"admin"}):
@@ -1711,162 +1278,148 @@ class DispatchHandler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
-    def handle_login(self) -> None:
-        try:
-            payload = self.read_json()
-            login = payload.get("login", "").strip()
-            password = payload.get("password", "")
-            ensure_storage()
-            with db_connect() as conn:
-                user = conn.execute(
-                    "SELECT * FROM users WHERE email_or_mobile = ? AND active_status = 1",
-                    (login,),
-                ).fetchone()
-                if not user or not verify_password(password, user["password_hash"]):
-                    self.send_json({"error": "Invalid login or password."}, HTTPStatus.UNAUTHORIZED)
-                    return
-                token = secrets.token_urlsafe(32)
-                expires_at = (datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)).isoformat()
-                conn.execute(
-                    "INSERT INTO auth_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-                    (token, user["id"], now_iso(), expires_at),
-                )
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header(
-                    "Set-Cookie",
-                    f"dispatch_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_DAYS * 86400}",
-                )
-                data = json.dumps({"user": serialize_user(user)}).encode("utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-        except Exception as exc:
-            print(f"LOGIN_ERROR {type(exc).__name__}: {exc}", flush=True)
-            self.send_json(
-                {
-                    "error": "Login server error.",
-                    "errorType": type(exc).__name__,
-                    "detail": str(exc),
-                },
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-
     def handle_health(self) -> None:
-        payload = {
-            "ok": True,
-            "dataDir": str(DATA_DIR),
-            "uploadDir": str(UPLOAD_DIR),
-            "dbPath": str(DB_PATH),
-            "dbExists": DB_PATH.exists(),
-            "uploadDirExists": UPLOAD_DIR.exists(),
-        }
         try:
-            ensure_storage()
             with db_connect() as conn:
-                tables = {
-                    row[0]
-                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-                }
-                payload["tables"] = sorted(tables)
-                payload["userColumns"] = [
-                    row["name"] for row in conn.execute("PRAGMA table_info(users)")
-                ] if "users" in tables else []
-                payload["users"] = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] if "users" in tables else 0
-                payload["jobs"] = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0] if "dispatch_jobs" in tables else 0
-                payload["uploadFiles"] = sum(1 for item in UPLOAD_DIR.rglob("*") if item.is_file()) if UPLOAD_DIR.exists() else 0
-                sample_bill = conn.execute(
-                    "SELECT bill_file_url FROM dispatch_jobs WHERE bill_file_url IS NOT NULL AND bill_file_url != '' LIMIT 1"
-                ).fetchone() if "dispatch_jobs" in tables else None
-                if sample_bill:
-                    sample_path = upload_url_to_path(sample_bill["bill_file_url"])
-                    payload["sampleBillUrl"] = sample_bill["bill_file_url"]
-                    payload["sampleBillPath"] = str(sample_path)
-                    payload["sampleBillExists"] = sample_path.exists()
-        except Exception as exc:
-            payload.update({"ok": False, "errorType": type(exc).__name__, "detail": str(exc)})
-        self.send_json(payload, HTTPStatus.OK if payload.get("ok") else HTTPStatus.INTERNAL_SERVER_ERROR)
+                tables = [row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+                users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] if "users" in tables else 0
+                jobs = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0] if "dispatch_jobs" in tables else 0
+            sample_bill = next(BILLS_DIR.glob("*"), None) if BILLS_DIR.exists() else None
+            self.send_json({
+                "ok": True,
+                "dataDir": str(DATA_DIR),
+                "uploadDir": str(UPLOAD_DIR),
+                "dbPath": str(DB_PATH),
+                "dbExists": DB_PATH.exists(),
+                "uploadDirExists": UPLOAD_DIR.exists(),
+                "tables": tables,
+                "userColumns": sorted(table_columns(sqlite3.connect(DB_PATH), "users")) if DB_PATH.exists() else [],
+                "users": users,
+                "jobs": jobs,
+                "uploadFiles": sum(1 for _ in UPLOAD_DIR.rglob("*")) if UPLOAD_DIR.exists() else 0,
+                "sampleBillUrl": f"/uploads/bills/{sample_bill.name}" if sample_bill else None,
+                "sampleBillPath": str(sample_bill) if sample_bill else None,
+                "sampleBillExists": sample_bill.exists() if sample_bill else False,
+            })
+        except Exception as exc:  # pragma: no cover - diagnostic endpoint
+            self.send_json({"ok": False, "error": str(exc), "dataDir": str(DATA_DIR), "dbPath": str(DB_PATH)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def require_roles(self, user: sqlite3.Row, roles: set[str]) -> bool:
+        if user["role"] not in roles:
+            self.send_json({"error": "Access denied"}, HTTPStatus.FORBIDDEN)
+            return False
+        return True
+
+    def current_user(self):
+        cookie = SimpleCookie(self.headers.get("Cookie"))
+        token = cookie.get(SESSION_COOKIE)
+        if not token:
+            return None
+        with db_connect() as conn:
+            row = conn.execute(
+                """
+                SELECT users.* FROM auth_sessions
+                JOIN users ON users.id = auth_sessions.user_id
+                WHERE auth_sessions.token = ? AND auth_sessions.expires_at > ? AND users.active_status = 1
+                """,
+                (token.value, now_iso()),
+            ).fetchone()
+        return row
+
+    def handle_login(self) -> None:
+        payload = read_json_body(self)
+        login = payload.get("login", "").strip()
+        password = payload.get("password", "")
+        with db_connect() as conn:
+            user = conn.execute("SELECT * FROM users WHERE email_or_mobile = ? AND active_status = 1", (login,)).fetchone()
+            if not user or not verify_password(password, user["password_hash"]):
+                self.send_json({"error": "Invalid login or password"}, HTTPStatus.UNAUTHORIZED)
+                return
+            token = secrets.token_urlsafe(32)
+            timestamp = now_iso()
+            expires = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + SESSION_TTL_SECONDS, timezone.utc).isoformat()
+            conn.execute("INSERT INTO auth_sessions (token, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)", (token, user["id"], expires, timestamp))
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}")
+        self.end_headers()
+        self.wfile.write(json.dumps({"user": serialize_user(user)}).encode("utf-8"))
 
     def handle_logout(self) -> None:
-        cookie = SimpleCookie(self.headers.get("Cookie", ""))
-        token = cookie.get("dispatch_session")
+        cookie = SimpleCookie(self.headers.get("Cookie"))
+        token = cookie.get(SESSION_COOKIE)
         if token:
             with db_connect() as conn:
                 conn.execute("DELETE FROM auth_sessions WHERE token = ?", (token.value,))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Set-Cookie", "dispatch_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
-        data = b'{"ok": true}'
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
         self.end_headers()
-        self.wfile.write(data)
-
-    def handle_bill_extract(self, user: sqlite3.Row) -> None:
-        form = self.parse_multipart()
-        upload = form["file"] if "file" in form else None
-        if upload is None or not getattr(upload, "filename", ""):
-            self.send_json({"error": "Bill file is required."}, HTTPStatus.BAD_REQUEST)
-            return
-        suffix = Path(upload.filename).suffix.lower()
-        if suffix != ".pdf":
-            self.send_json(
-                {"error": "Real extraction is currently available for PDF bills. Photo OCR comes next."},
-                HTTPStatus.BAD_REQUEST,
-            )
-            return
-        saved_name = f"{uuid.uuid4()}{suffix}"
-        saved_path = BILLS_DIR / saved_name
-        with saved_path.open("wb") as target:
-            shutil.copyfileobj(upload.file, target)
-        try:
-            text = extract_pdf_text(saved_path)
-            extracted = parse_bill_text(text)
-        except Exception as exc:
-            self.send_json({"error": f"Could not read PDF: {exc}"}, HTTPStatus.BAD_REQUEST)
-            return
-        self.send_json({"fileUrl": f"/uploads/bills/{saved_name}", "fileName": upload.filename, "extracted": extracted})
+        self.wfile.write(b"{}")
 
     def handle_create_dispatch(self, user: sqlite3.Row) -> None:
-        payload = self.read_json()
+        form = parse_multipart(self)
+        if form:
+            payload = {key: field_value(form, key) for key in form.keys()}
+            bill_file = form["billFile"] if "billFile" in form and getattr(form["billFile"], "filename", None) else None
+        else:
+            payload = read_json_body(self)
+            bill_file = None
         required = ["partyName", "place", "orderCaseCount", "deliveryRoute"]
-        if any(not payload.get(field) for field in required):
+        if any(not str(payload.get(item, "")).strip() for item in required):
             self.send_json({"error": "Party, place, route, and total cases are required."}, HTTPStatus.BAD_REQUEST)
             return
-        invoice = payload.get("invoiceNumber", "").strip()
+        timestamp = now_iso()
+        job_id = str(uuid.uuid4())
+        invoice_number = ""
+        bill_items = []
+        extracted = {}
+        bill_url = ""
+        if bill_file:
+            bill_url = save_upload(bill_file, BILLS_DIR)
+            extracted = extract_invoice_from_pdf(upload_url_to_path(bill_url))
+            invoice_number = extracted.get("invoiceNumber") or ""
+            bill_items = extracted.get("billItems") or []
+        manual_items = json_loads(payload.get("billItemsJson"), [])
+        if manual_items:
+            bill_items = normalize_bill_items(manual_items)
+        invoice_number = invoice_number or str(payload.get("invoiceNumber", "")).strip()
+        if invoice_number:
+            duplicate = conn_duplicate_invoice(invoice_number)
+            if duplicate:
+                self.send_json({"error": "Check duplicate invoice", "duplicateJobId": duplicate}, HTTPStatus.CONFLICT)
+                return
+        daily_entry = next_daily_entry(payload.get("dispatchDate") or timestamp[:10])
+        order_cases = int(float(payload.get("orderCaseCount") or extracted.get("orderCaseCount") or 0))
+        total_amount = payload.get("invoiceAmount") or payload.get("totalAmount") or extracted.get("invoiceAmount")
+        freight_amount = payload.get("freightAmount") or extracted.get("freightAmount")
         with db_connect() as conn:
-            timestamp = now_iso()
-            job_id = str(uuid.uuid4())
-            next_entry = conn.execute(
-                "SELECT COALESCE(MAX(daily_entry_no), 0) + 1 FROM dispatch_jobs WHERE dispatch_date = ?",
-                (payload.get("dispatchDate") or timestamp[:10],),
-            ).fetchone()[0]
             conn.execute(
                 """
                 INSERT INTO dispatch_jobs (
                     id, daily_entry_no, dispatch_date, invoice_number, party_name, party_city, party_mobile_number,
-                    place, bill_date, bill_file_url, extracted_bill_data_json,
-                    bill_items_json, total_cases, total_packages, total_packed_cases, total_amount,
+                    place, bill_date, bill_file_url, extracted_bill_data_json, total_cases, total_amount, bill_items_json,
                     delivery_route, transport_name, current_status, priority, uploaded_by, bill_uploaded_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 'ready', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
-                    next_entry,
+                    daily_entry,
                     payload.get("dispatchDate") or timestamp[:10],
-                    invoice,
-                    payload["partyName"].strip(),
-                    payload.get("partyCity", payload["place"]).strip(),
-                    payload.get("partyMobileNumber", "").strip(),
-                    payload["place"].strip(),
-                    payload.get("invoiceDate", payload.get("billDate", "")),
-                    payload.get("billFileUrl", ""),
-                    json.dumps(payload.get("extractedBillData", {})),
-                    json.dumps(payload.get("billItems", payload.get("extractedBillData", {}).get("items", []))),
-                    int(payload["orderCaseCount"]),
-                    payload.get("invoiceAmount", payload.get("totalAmount")),
+                    invoice_number,
+                    payload.get("partyName") or extracted.get("partyName") or "Unknown Party",
+                    payload.get("partyCity") or extracted.get("partyCity") or payload.get("place"),
+                    payload.get("partyMobileNumber") or "",
+                    payload.get("place") or extracted.get("partyCity") or payload.get("partyCity") or "",
+                    payload.get("invoiceDate") or extracted.get("invoiceDate") or timestamp[:10],
+                    bill_url,
+                    json.dumps(extracted, ensure_ascii=False),
+                    order_cases,
+                    float(total_amount) if total_amount not in (None, "") else None,
+                    json.dumps(bill_items, ensure_ascii=False),
                     payload.get("deliveryRoute", "").strip(),
-                    payload.get("extractedBillData", {}).get("transporter", "").strip(),
+                    payload.get("transportName", "").strip(),
                     payload.get("priority", "normal"),
                     user["id"],
                     timestamp,
@@ -1874,68 +1427,85 @@ class DispatchHandler(BaseHTTPRequestHandler):
                     timestamp,
                 ),
             )
-            conn.execute(
-                """
-                INSERT INTO packing_details
-                (id, dispatch_job_id, packing_breakup_json, packing_type, shop_package_count, packing_photo_urls_json,
-                 number_of_boxes, number_of_cases, dispatcher_note, product_photo_url, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, '', 0, '[]', 0, ?, '', '', NULL, ?, ?)
-                """,
-                (str(uuid.uuid4()), job_id, json.dumps(empty_packing()), int(payload["orderCaseCount"]), timestamp, timestamp),
-            )
-            conn.execute(
-                """
-                INSERT INTO review_details
-                (id, dispatch_job_id, reviewer_id, review_decision, reviewer_note,
-                 transporter_delivery_partner_name, reviewed_at, created_at, updated_at)
-                VALUES (?, ?, NULL, NULL, '', '', NULL, ?, ?)
-                """,
-                (str(uuid.uuid4()), job_id, timestamp, timestamp),
-            )
-            conn.execute(
-                """
-                INSERT INTO bilty_details
-                (id, dispatch_job_id, bilty_number, bilty_photo_url, delivery_partner_name,
-                 freight_amount, bilty_uploaded_by, bilty_uploaded_at, created_at, updated_at)
-                VALUES (?, ?, '', '', '', ?, NULL, NULL, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    job_id,
-                    payload.get("extractedBillData", {}).get("freightAmount"),
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO ai_photo_checks
-                (id, dispatch_job_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (str(uuid.uuid4()), job_id, timestamp, timestamp),
-            )
-            log_action(conn, job_id, user, "bill_uploaded", None, "ready", metadata={"bill_file_url": payload.get("billFileUrl", "")})
-            self.send_json(serialize_job_for_user(conn, job_id, user), HTTPStatus.CREATED)
+            log_activity(conn, user, job_id, "bill_uploaded", None, "ready", "Bill uploaded", {"dailyEntryNo": daily_entry})
+        self.send_json({"job": serialize_job_by_id(job_id)}, HTTPStatus.CREATED)
 
-    def handle_claim_dispatch(self, user: sqlite3.Row, job_id: str) -> None:
+    def handle_bulk_import(self, user: sqlite3.Row) -> None:
+        form = parse_multipart(self)
+        if not form or "billFiles" not in form:
+            self.send_json({"error": "Upload bill PDFs"}, HTTPStatus.BAD_REQUEST)
+            return
+        files = form["billFiles"] if isinstance(form["billFiles"], list) else [form["billFiles"]]
+        created = []
+        errors = []
+        for file_item in files:
+            if not getattr(file_item, "filename", None):
+                continue
+            try:
+                bill_url = save_upload(file_item, BILLS_DIR)
+                extracted = extract_invoice_from_pdf(upload_url_to_path(bill_url))
+                party = extracted.get("partyName") or Path(file_item.filename).stem.replace("-", " ")[:80]
+                city = extracted.get("partyCity") or "Manual city"
+                order_cases = int(extracted.get("orderCaseCount") or 0)
+                invoice_number = extracted.get("invoiceNumber") or ""
+                if invoice_number and conn_duplicate_invoice(invoice_number):
+                    errors.append({"file": file_item.filename, "error": "Check duplicate invoice"})
+                    continue
+                timestamp = now_iso()
+                dispatch_date = field_value(form, "dispatchDate", timestamp[:10])
+                job_id = str(uuid.uuid4())
+                daily_entry = next_daily_entry(dispatch_date)
+                with db_connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO dispatch_jobs (
+                            id, daily_entry_no, dispatch_date, invoice_number, party_name, party_city, place, bill_date,
+                            bill_file_url, extracted_bill_data_json, total_cases, total_amount, bill_items_json,
+                            delivery_route, transport_name, current_status, priority, uploaded_by, bill_uploaded_at, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 'normal', ?, ?, ?, ?)
+                        """,
+                        (
+                            job_id,
+                            daily_entry,
+                            dispatch_date,
+                            invoice_number,
+                            party,
+                            city,
+                            city,
+                            extracted.get("invoiceDate") or dispatch_date,
+                            bill_url,
+                            json.dumps(extracted, ensure_ascii=False),
+                            order_cases,
+                            extracted.get("invoiceAmount"),
+                            json.dumps(extracted.get("billItems") or [], ensure_ascii=False),
+                            field_value(form, "deliveryRoute", "Route 1"),
+                            field_value(form, "transportName", ""),
+                            user["id"],
+                            timestamp,
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    log_activity(conn, user, job_id, "bill_uploaded", None, "ready", "Bulk bill uploaded", {"file": file_item.filename})
+                created.append(serialize_job_by_id(job_id))
+            except Exception as exc:  # pragma: no cover - per-file safety
+                errors.append({"file": file_item.filename, "error": str(exc)})
+        self.send_json({"created": created, "errors": errors}, HTTPStatus.CREATED)
+
+    def handle_claim(self, job_id: str, user: sqlite3.Row) -> None:
         with db_connect() as conn:
-            job = self.require_job(conn, job_id)
-            if not job:
-                return
-            if job["current_status"] != "ready" or job["dispatcher_id"]:
-                self.send_json({"error": "This job is no longer available to claim."}, HTTPStatus.CONFLICT)
-                return
-            active_count = conn.execute(
-                """
-                SELECT COUNT(*) FROM dispatch_jobs
-                WHERE dispatcher_id = ?
-                AND current_status IN ('assigned', 'goods-photo-uploaded', 'goods-needs-correction', 'goods-approved', 'packing', 'needs-correction')
-                """,
-                (user["id"],),
+            active = conn.execute(
+                "SELECT COUNT(*) FROM dispatch_jobs WHERE dispatcher_id = ? AND current_status IN ({})".format(
+                    ",".join("?" for _ in ACTIVE_DISPATCHER_STATUSES)
+                ),
+                (user["id"], *ACTIVE_DISPATCHER_STATUSES),
             ).fetchone()[0]
-            if active_count >= 2:
-                self.send_json({"error": "You already have 2 active jobs. Complete one job before taking another."}, HTTPStatus.CONFLICT)
+            if active >= 2:
+                self.send_json({"error": "You already have 2 active jobs. Complete one job before taking another."}, HTTPStatus.BAD_REQUEST)
+                return
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job or job["current_status"] != "ready":
+                self.send_json({"error": "Job is not available."}, HTTPStatus.BAD_REQUEST)
                 return
             timestamp = now_iso()
             conn.execute(
@@ -1946,783 +1516,748 @@ class DispatchHandler(BaseHTTPRequestHandler):
                 """,
                 (user["id"], timestamp, timestamp, job_id),
             )
-            log_action(conn, job_id, user, "job_claimed", "ready", "assigned")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+            log_activity(conn, user, job_id, "job_claimed", job["current_status"], "assigned", "Job claimed")
+        self.send_json({"job": serialize_job_by_id(job_id)})
 
-    def handle_unassign_dispatch(self, user: sqlite3.Row, job_id: str) -> None:
+    def handle_unassign(self, job_id: str, user: sqlite3.Row) -> None:
         with db_connect() as conn:
-            job = self.require_owned_dispatcher_job(conn, user, job_id)
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
             if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
                 return
-            packing = conn.execute("SELECT * FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-            photo_count = conn.execute(
-                "SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type IN ('pre-dispatch', 'final-packing')",
-                (job_id,),
-            ).fetchone()[0]
-            breakup = normalize_packing_lines(load_json(packing["packing_breakup_json"], empty_packing()))
-            if job["current_status"] != "assigned" or breakup or photo_count:
-                self.send_json({"error": "Only untouched claimed jobs can be unassigned."}, HTTPStatus.CONFLICT)
+            if user["role"] == "dispatcher" and job["dispatcher_id"] != user["id"]:
+                self.send_json({"error": "You can only unassign your own job."}, HTTPStatus.FORBIDDEN)
+                return
+            untouched = job["current_status"] == "assigned" and not conn.execute("SELECT COUNT(*) FROM packing_breakup WHERE dispatch_job_id = ?", (job_id,)).fetchone()[0] and not conn.execute("SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ?", (job_id,)).fetchone()[0]
+            if user["role"] == "dispatcher" and not untouched:
+                self.send_json({"error": "Only untouched assigned jobs can be unassigned."}, HTTPStatus.BAD_REQUEST)
                 return
             timestamp = now_iso()
-            conn.execute(
-                """
-                UPDATE dispatch_jobs
-                SET dispatcher_id = NULL, current_status = 'ready', job_claimed_at = NULL, updated_at = ?
-                WHERE id = ?
-                """,
-                (timestamp, job_id),
-            )
-            log_action(conn, job_id, user, "job_unassigned", "assigned", "ready")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+            conn.execute("UPDATE dispatch_jobs SET dispatcher_id = NULL, current_status = 'ready', job_claimed_at = NULL, updated_at = ? WHERE id = ?", (timestamp, job_id))
+            log_activity(conn, user, job_id, "job_unassigned", job["current_status"], "ready", "Job returned to available work")
+        self.send_json({"job": serialize_job_by_id(job_id)})
 
-    def handle_save_packing(self, user: sqlite3.Row, job_id: str) -> None:
-        payload = self.read_json()
-        with db_connect() as conn:
-            job = self.require_owned_dispatcher_job(conn, user, job_id)
-            if not job:
-                return
-            if job["current_status"] not in {
-                "assigned",
-                "goods-photo-uploaded",
-                "goods-needs-correction",
-                "goods-approved",
-                "packing",
-                "needs-correction",
-            }:
-                self.send_json({"error": "Packing can no longer be edited for this job."}, HTTPStatus.CONFLICT)
-                return
-            packing = normalize_packing_lines(payload.get("packingBreakup", empty_packing()))
-            totals = packing_totals(packing)
-            packing_type = payload.get("packingType", "").strip()
-            number_of_boxes = totals["totalPackages"]
-            number_of_cases = totals["totalPackedCases"]
-            note = payload.get("dispatcherNote", "").strip()
-            shortage_reason = payload.get("shortageReason", "").strip()
-            shortage_note = payload.get("shortageNote", "").strip()
-            shortage_items = payload.get("shortageItems", [])
-            timestamp = now_iso()
-            old_status = job["current_status"]
-            new_status = "packing" if old_status in {"assigned", "goods-photo-uploaded", "goods-needs-correction", "goods-approved"} else old_status
-            conn.execute(
-                """
-                UPDATE packing_details
-                SET packing_breakup_json = ?, packing_type = ?, shop_package_count = ?, number_of_boxes = ?,
-                    number_of_cases = ?, dispatcher_note = ?, updated_at = ?
-                WHERE dispatch_job_id = ?
-                """,
-                (json.dumps(packing), packing_type, totals["totalPackages"], number_of_boxes, number_of_cases, note, timestamp, job_id),
-            )
-            conn.execute("DELETE FROM packing_breakup WHERE dispatch_job_id = ?", (job_id,))
-            for line in packing:
-                conn.execute(
-                    """
-                    INSERT INTO packing_breakup
-                    (id, dispatch_job_id, packing_type, no_of_packages, cases_per_package, total_cases, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(uuid.uuid4()),
-                        job_id,
-                        line["packageType"],
-                        line["packageCount"],
-                        line["casesPerPackage"],
-                        line["totalCases"],
-                        timestamp,
-                        timestamp,
-                    ),
-                )
-            conn.execute(
-                """
-                UPDATE dispatch_jobs
-                SET current_status = ?, packing_started_at = COALESCE(packing_started_at, ?),
-                    dispatcher_note = ?, total_packages = ?, total_packed_cases = ?,
-                    shortage_reason = ?, shortage_note = ?, shortage_items_json = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    new_status,
-                    timestamp,
-                    note,
-                    totals["totalPackages"],
-                    totals["totalPackedCases"],
-                    shortage_reason,
-                    shortage_note,
-                    json.dumps(shortage_items),
-                    timestamp,
-                    job_id,
-                ),
-            )
-            log_action(
-                conn,
-                job_id,
-                user,
-                "packing_saved",
-                old_status,
-                new_status,
-                metadata={
-                    "packing_breakup": packing,
-                    "total_packages": totals["totalPackages"],
-                    "total_packed_cases": totals["totalPackedCases"],
-                    "order_case_count": job["total_cases"],
-                    "shortage_reason": shortage_reason,
-                },
-            )
-            self.send_json(serialize_job_for_user(conn, job_id, user))
-
-    def handle_product_photo(self, user: sqlite3.Row, job_id: str) -> None:
-        form = self.parse_multipart()
-        upload = form["file"] if "file" in form else None
-        photo_type = str(form["photoType"].value).strip() if "photoType" in form else "final-packing"
-        if photo_type not in {"goods-check", "pre-dispatch", "final-packing"}:
-            photo_type = "final-packing"
-        if upload is None or not getattr(upload, "filename", ""):
-            self.send_json({"error": "Product photo is required."}, HTTPStatus.BAD_REQUEST)
+    def handle_product_photo(self, job_id: str, user: sqlite3.Row, photo_type: str = "packing") -> None:
+        form = parse_multipart(self)
+        if not form or "photo" not in form:
+            self.send_json({"error": "Upload packing photo"}, HTTPStatus.BAD_REQUEST)
             return
+        photo_items = form["photo"] if isinstance(form["photo"], list) else [form["photo"]]
+        normalized_type = normalize_photo_type(field_value(form, "photoType", photo_type))
         with db_connect() as conn:
-            job = self.require_owned_dispatcher_job(conn, user, job_id)
-            if not job:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job or job["dispatcher_id"] != user["id"]:
+                self.send_json({"error": "Job not assigned to you"}, HTTPStatus.FORBIDDEN)
                 return
-            if photo_type == "goods-check":
-                allowed_statuses = {"assigned", "goods-photo-uploaded", "goods-needs-correction", "packing", "needs-correction"}
-            else:
-                allowed_statuses = {"goods-approved", "packing", "needs-correction"}
-            if job["current_status"] not in allowed_statuses:
-                self.send_json({"error": "Product photo cannot be changed at this stage."}, HTTPStatus.CONFLICT)
+            if job["current_status"] in {"submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"}:
+                self.send_json({"error": "Packing cannot be edited for this job."}, HTTPStatus.BAD_REQUEST)
                 return
-            suffix = Path(upload.filename).suffix.lower() or ".jpg"
-            saved_name = f"{uuid.uuid4()}{suffix}"
-            saved_path = PRODUCT_PHOTOS_DIR / saved_name
-            with saved_path.open("wb") as target:
-                shutil.copyfileobj(upload.file, target)
             timestamp = now_iso()
-            old_status = job["current_status"]
-            photo_url = f"/uploads/product-photos/{saved_name}"
-            if photo_type == "goods-check":
+            urls = []
+            for photo_item in photo_items:
+                if not getattr(photo_item, "filename", None):
+                    continue
+                url = save_upload(photo_item, PRODUCT_PHOTOS_DIR)
+                urls.append(url)
                 conn.execute(
-                    """
-                    UPDATE dispatch_jobs
-                    SET current_status = CASE
-                            WHEN current_status IN ('assigned', 'goods-photo-uploaded', 'goods-needs-correction') THEN 'packing'
-                            ELSE current_status
-                        END,
-                        goods_photo_uploaded_at = ?,
-                        packing_started_at = COALESCE(packing_started_at, ?),
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (timestamp, timestamp, timestamp, job_id),
+                    "INSERT INTO photos (id, dispatch_job_id, photo_type, file_url, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), job_id, normalized_type, url, user["id"], timestamp),
                 )
-                new_status = "packing" if old_status in {"assigned", "goods-photo-uploaded", "goods-needs-correction"} else old_status
-            else:
-                packing_row = conn.execute("SELECT packing_photo_urls_json FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-                photos = load_json(packing_row["packing_photo_urls_json"], [])
-                photos.append(photo_url)
-                conn.execute(
-                    """
-                    UPDATE packing_details
-                    SET product_photo_url = ?, packing_photo_urls_json = ?, updated_at = ?
-                    WHERE dispatch_job_id = ?
-                    """,
-                    (photo_url, json.dumps(photos), timestamp, job_id),
-                )
-                conn.execute(
-                    """
-                    UPDATE dispatch_jobs
-                    SET current_status = CASE WHEN current_status = 'goods-approved' THEN 'packing' ELSE current_status END,
-                        packing_started_at = COALESCE(packing_started_at, ?),
-                        product_photo_uploaded_at = ?,
-                        updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (timestamp, timestamp, timestamp, job_id),
-                )
-                new_status = "packing" if old_status == "goods-approved" else old_status
-            log_action(
-                conn,
-                job_id,
-                user,
-                "product_photo_uploaded",
-                old_status,
-                new_status,
-                metadata={"file_url": photo_url, "photo_type": photo_type},
-            )
-            conn.execute(
-                """
-                INSERT INTO photos (id, dispatch_job_id, photo_type, file_url, uploaded_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (str(uuid.uuid4()), job_id, photo_type, photo_url, user["id"], timestamp),
-            )
-            self.send_json(serialize_job_for_user(conn, job_id, user))
-
-    def handle_submit_goods_review(self, user: sqlite3.Row, job_id: str) -> None:
-        with db_connect() as conn:
-            job = self.require_owned_dispatcher_job(conn, user, job_id)
-            if not job:
-                return
-            goods_photo_count = conn.execute(
-                "SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type = 'goods-check'",
-                (job_id,),
-            ).fetchone()[0]
-            if not goods_photo_count:
-                self.send_json({"error": "Upload goods photo"}, HTTPStatus.BAD_REQUEST)
-                return
-            if job["current_status"] not in {"goods-photo-uploaded", "goods-needs-correction"}:
-                self.send_json({"error": "Goods check is not ready for review."}, HTTPStatus.CONFLICT)
-                return
-            timestamp = now_iso()
-            old_status = job["current_status"]
-            conn.execute(
-                """
-                UPDATE dispatch_jobs
-                SET current_status = 'goods-submitted-for-review',
-                    goods_submitted_for_review_at = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (timestamp, timestamp, job_id),
-            )
-            log_action(conn, job_id, user, "goods_submitted_for_review", old_status, "goods-submitted-for-review")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
-
-    def handle_goods_review_decision(self, user: sqlite3.Row, job_id: str) -> None:
-        payload = self.read_json()
-        decision = payload.get("decision")
-        note = payload.get("reviewerNote", "").strip()
-        if decision not in {"approve", "correction", "cancel"}:
-            self.send_json({"error": "Invalid goods review decision."}, HTTPStatus.BAD_REQUEST)
-            return
-        with db_connect() as conn:
-            job = self.require_job(conn, job_id)
-            if not job:
-                return
-            if job["current_status"] != "goods-submitted-for-review":
-                self.send_json({"error": "Only submitted goods checks can be reviewed."}, HTTPStatus.CONFLICT)
-                return
-            timestamp = now_iso()
-            status_map = {
-                "approve": "goods-approved",
-                "correction": "goods-needs-correction",
-                "cancel": "cancelled",
-            }
-            new_status = status_map[decision]
-            conn.execute(
-                """
-                UPDATE dispatch_jobs
-                SET current_status = ?,
-                    reviewer_id = ?,
-                    goods_reviewer_note = ?,
-                    goods_reviewed_at = ?,
-                    goods_approved_at = CASE WHEN ? = 'approve' THEN ? ELSE goods_approved_at END,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (new_status, user["id"], note, timestamp, decision, timestamp, timestamp, job_id),
-            )
-            conn.execute(
-                """
-                UPDATE ai_photo_checks
-                SET ai_check_status = ?,
-                    ai_summary = ?,
-                    ai_checked_at = ?,
-                    ai_model_version = COALESCE(ai_model_version, 'human-label-v1'),
-                    updated_at = ?
-                WHERE dispatch_job_id = ?
-                """,
-                (
-                    f"human-{decision}",
-                    note or f"Human reviewer marked goods as {decision}.",
-                    timestamp,
-                    timestamp,
-                    job_id,
-                ),
-            )
-            log_action(conn, job_id, user, f"goods_review_{decision}", "goods-submitted-for-review", new_status, remarks=note)
-            self.send_json(serialize_job_for_user(conn, job_id, user))
-
-    def handle_closeup_photo(self, user: sqlite3.Row, job_id: str) -> None:
-        form = self.parse_multipart()
-        upload = form["file"] if "file" in form else None
-        if upload is None or not getattr(upload, "filename", ""):
-            self.send_json({"error": "Close-up photo is required."}, HTTPStatus.BAD_REQUEST)
-            return
-        with db_connect() as conn:
-            job = self.require_owned_dispatcher_job(conn, user, job_id)
-            if not job:
-                return
-            if job["current_status"] not in {"assigned", "packing", "needs-correction"}:
-                self.send_json({"error": "Close-up photo cannot be changed at this stage."}, HTTPStatus.CONFLICT)
-                return
-            suffix = Path(upload.filename).suffix.lower() or ".jpg"
-            saved_name = f"{uuid.uuid4()}{suffix}"
-            saved_path = PRODUCT_PHOTOS_DIR / saved_name
-            with saved_path.open("wb") as target:
-                shutil.copyfileobj(upload.file, target)
-            photo_url = f"/uploads/product-photos/{saved_name}"
-            timestamp = now_iso()
-            conn.execute(
-                "UPDATE packing_details SET closeup_marking_photo_url = ?, updated_at = ? WHERE dispatch_job_id = ?",
-                (photo_url, timestamp, job_id),
-            )
-            log_action(conn, job_id, user, "closeup_photo_uploaded", job["current_status"], job["current_status"], metadata={"file_url": photo_url, "photo_type": "closeup"})
-            self.send_json(serialize_job_for_user(conn, job_id, user))
-
-    def handle_submit_review(self, user: sqlite3.Row, job_id: str) -> None:
-        with db_connect() as conn:
-            job = self.require_owned_dispatcher_job(conn, user, job_id)
-            if not job:
-                return
-            goods_photo_count = conn.execute(
-                """
-                SELECT COUNT(*) FROM photos
-                WHERE dispatch_job_id = ? AND photo_type = 'goods-check'
-                """,
-                (job_id,),
-            ).fetchone()[0]
-            if not goods_photo_count:
-                self.send_json({"error": "Upload goods photo"}, HTTPStatus.BAD_REQUEST)
-                return
-            packing = conn.execute("SELECT * FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-            breakup = normalize_packing_lines(load_json(packing["packing_breakup_json"], empty_packing()))
-            packing_photo_count = conn.execute(
-                """
-                SELECT COUNT(*) FROM photos
-                WHERE dispatch_job_id = ? AND photo_type IN ('pre-dispatch', 'final-packing')
-                """,
-                (job_id,),
-            ).fetchone()[0]
-            if not packing_photo_count and not packing["product_photo_url"]:
+            if not urls:
                 self.send_json({"error": "Upload packing photo"}, HTTPStatus.BAD_REQUEST)
                 return
-            if not breakup:
-                self.send_json({"error": "Enter packing breakup"}, HTTPStatus.BAD_REQUEST)
-                return
-            totals = packing_totals(breakup)
-            if case_count_mismatch(totals, job) and not (has_valid_item_difference(totals, job) or has_admin_case_override(job)):
-                self.send_json({"error": "Add item difference matching packed case difference."}, HTTPStatus.BAD_REQUEST)
-                return
-            if job["current_status"] not in {"packing", "needs-correction"}:
-                self.send_json({"error": "This job is not ready to submit for review."}, HTTPStatus.CONFLICT)
-                return
-            timestamp = now_iso()
-            old_status = job["current_status"]
+            new_status = job["current_status"]
+            if normalized_type == "goods-check":
+                new_status = "goods-photo-uploaded"
+            elif job["current_status"] in {"assigned", "goods-photo-uploaded", "goods-approved"}:
+                new_status = "product-photo-uploaded"
             conn.execute(
                 """
                 UPDATE dispatch_jobs
-                SET current_status = 'submitted-for-review',
-                    submitted_for_review_at = ?,
-                    correction_resubmitted_at = CASE WHEN correction_count > 0 AND correction_sent_at IS NOT NULL THEN ? ELSE correction_resubmitted_at END,
-                    updated_at = ?
+                SET current_status = ?, product_photo_uploaded_at = ?, packing_started_at = COALESCE(packing_started_at, ?), updated_at = ?
                 WHERE id = ?
                 """,
-                (timestamp, timestamp, timestamp, job_id),
+                (new_status, timestamp, timestamp, timestamp, job_id),
             )
-            log_action(conn, job_id, user, "submitted_for_review", old_status, "submitted-for-review")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+            log_activity(conn, user, job_id, "photo_uploaded", job["current_status"], new_status, "Packing photo uploaded", {"photoType": normalized_type, "photos": urls})
+        self.send_json({"job": serialize_job_by_id(job_id), "urls": urls})
 
-    def handle_review_decision(self, user: sqlite3.Row, job_id: str) -> None:
-        payload = self.read_json()
-        decision = payload.get("decision")
-        note = payload.get("reviewerNote", "").strip()
-        if decision not in {"approve", "correction", "cancel"}:
-            self.send_json({"error": "Invalid review decision."}, HTTPStatus.BAD_REQUEST)
-            return
+    def handle_submit_goods_review(self, job_id: str, user: sqlite3.Row) -> None:
         with db_connect() as conn:
-            job = self.require_job(conn, job_id)
-            if not job:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job or job["dispatcher_id"] != user["id"]:
+                self.send_json({"error": "Job not assigned to you"}, HTTPStatus.FORBIDDEN)
                 return
-            if job["current_status"] != "submitted-for-review":
-                self.send_json({"error": "Only jobs submitted for review can be reviewed."}, HTTPStatus.CONFLICT)
-                return
-            packing = conn.execute("SELECT * FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-            breakup = normalize_packing_lines(load_json(packing["packing_breakup_json"], empty_packing())) if packing else []
-            packing_photo_count = conn.execute(
-                """
-                SELECT COUNT(*) FROM photos
-                WHERE dispatch_job_id = ? AND photo_type IN ('pre-dispatch', 'final-packing')
-                """,
-                (job_id,),
-            ).fetchone()[0]
-            goods_photo_count = conn.execute(
-                "SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type = 'goods-check'",
-                (job_id,),
-            ).fetchone()[0]
-            totals = packing_totals(breakup)
-            if decision == "approve":
-                if not goods_photo_count or (not packing_photo_count and not (packing["product_photo_url"] if packing else "")):
-                    self.send_json({"error": "Cannot approve. Required photos are missing."}, HTTPStatus.BAD_REQUEST)
-                    return
-                if not breakup:
-                    self.send_json({"error": "Cannot approve. Please enter package breakup."}, HTTPStatus.BAD_REQUEST)
-                    return
-                if case_count_mismatch(totals, job) and not (has_valid_item_difference(totals, job) or has_admin_case_override(job)):
-                    self.send_json({"error": "Cannot approve. Item difference does not match packed case difference."}, HTTPStatus.BAD_REQUEST)
-                    return
-            if decision == "approve" and job["correction_count"] > 0 and not note:
-                self.send_json({"error": "Reviewer note is required after a correction was raised."}, HTTPStatus.BAD_REQUEST)
+            goods_count = conn.execute("SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type = 'goods-check'", (job_id,)).fetchone()[0]
+            if not goods_count:
+                self.send_json({"error": "Upload goods photo"}, HTTPStatus.BAD_REQUEST)
                 return
             timestamp = now_iso()
-            status_map = {"approve": "approved-by-reviewer", "correction": "needs-correction", "cancel": "cancelled"}
-            new_status = status_map[decision]
+            conn.execute("UPDATE dispatch_jobs SET current_status = 'goods-submitted-for-review', updated_at = ? WHERE id = ?", (timestamp, job_id))
+            log_activity(conn, user, job_id, "goods_submitted", job["current_status"], "goods-submitted-for-review", "Goods submitted for review")
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_goods_review_decision(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
+        decision = payload.get("decision")
+        note = payload.get("note", "").strip()
+        if decision == "send-back" and not note:
+            self.send_json({"error": "Please enter correction reason."}, HTTPStatus.BAD_REQUEST)
+            return
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if decision == "approve":
+                new_status = "goods-approved"
+                action = "goods_approved"
+                remarks = note or "Goods photo approved"
+            elif decision == "send-back":
+                new_status = "goods-needs-correction"
+                action = "goods_correction_sent"
+                remarks = note
+            else:
+                self.send_json({"error": "Invalid decision"}, HTTPStatus.BAD_REQUEST)
+                return
+            timestamp = now_iso()
             conn.execute(
-                """
-                UPDATE review_details
-                SET reviewer_id = ?, review_decision = ?, reviewer_note = ?,
-                    transporter_delivery_partner_name = ?, reviewed_at = ?, updated_at = ?
-                WHERE dispatch_job_id = ?
-                """,
-                (user["id"], decision, note, job["delivery_partner_name"] or "", timestamp, timestamp, job_id),
+                "UPDATE dispatch_jobs SET current_status = ?, reviewer_id = ?, reviewer_note = ?, reviewed_at = ?, updated_at = ? WHERE id = ?",
+                (new_status, user["id"], note, timestamp, timestamp, job_id),
             )
+            log_activity(conn, user, job_id, action, job["current_status"], new_status, remarks)
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_update_packing(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
+        raw_lines = payload.get("packingBreakup", [])
+        lines = normalize_packing_lines(raw_lines)
+        total_packages = sum(item["packageCount"] for item in lines)
+        total_cases = sum(item["totalCases"] for item in lines)
+        shortage_items = normalize_exception_items(payload.get("shortageItems", []))
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if user["role"] == "dispatcher" and job["dispatcher_id"] != user["id"]:
+                self.send_json({"error": "Job not assigned to you"}, HTTPStatus.FORBIDDEN)
+                return
+            if user["role"] == "dispatcher" and job["current_status"] in {"submitted-for-review", "approved-by-reviewer", "dispatch-pending", "dispatched", "delivered", "completed"}:
+                self.send_json({"error": "Packing cannot be edited for this job."}, HTTPStatus.BAD_REQUEST)
+                return
+            if not lines:
+                self.send_json({"error": "Enter packing breakup"}, HTTPStatus.BAD_REQUEST)
+                return
+            order_cases = int(job["total_cases"] or 0)
+            expected_delta = total_cases - order_cases
+            if expected_delta != 0 and not exception_items_match_delta(shortage_items, expected_delta):
+                self.send_json({"error": "Packed cases do not match bill cases. Please correct the breakup or enter valid item difference."}, HTTPStatus.BAD_REQUEST)
+                return
+            timestamp = now_iso()
+            conn.execute("DELETE FROM packing_breakup WHERE dispatch_job_id = ?", (job_id,))
+            for line in lines:
+                conn.execute(
+                    """
+                    INSERT INTO packing_breakup (id, dispatch_job_id, packing_type, no_of_packages, cases_per_package, total_cases, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), job_id, line["packageType"], line["packageCount"], line["casesPerPackage"], line["totalCases"], timestamp),
+                )
+            status = job["current_status"]
+            if status in {"assigned", "goods-approved", "goods-photo-uploaded", "goods-needs-correction"}:
+                status = "packing"
             conn.execute(
                 """
                 UPDATE dispatch_jobs
-                SET current_status = ?, reviewer_id = ?, reviewer_note = ?,
-                    reviewed_at = ?, correction_sent_at = CASE WHEN ? = 'correction' THEN ? ELSE correction_sent_at END,
-                    reviewer_approved_at = CASE WHEN ? = 'approve' THEN ? ELSE reviewer_approved_at END,
-                    correction_count = correction_count + CASE WHEN ? = 'correction' THEN 1 ELSE 0 END,
-                    updated_at = ?
+                SET total_packages = ?, total_packed_cases = ?, shortage_note = ?, shortage_items_json = ?, current_status = ?,
+                    dispatcher_note = ?, packing_started_at = COALESCE(packing_started_at, ?), updated_at = ?
                 WHERE id = ?
                 """,
                 (
-                    new_status,
-                    user["id"],
-                    note,
+                    total_packages,
+                    total_cases,
+                    payload.get("shortageNote", "").strip(),
+                    json.dumps(shortage_items, ensure_ascii=False),
+                    status,
+                    payload.get("dispatcherNote", "").strip(),
                     timestamp,
-                    decision,
-                    timestamp,
-                    decision,
-                    timestamp,
-                    decision,
                     timestamp,
                     job_id,
                 ),
             )
-            log_action(conn, job_id, user, f"review_{decision}", "submitted-for-review", new_status, remarks=note)
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+            log_activity(conn, user, job_id, "packing_saved", job["current_status"], status, "Packing details saved", {"packing": packing_summary(lines)})
+        self.send_json({"job": serialize_job_by_id(job_id)})
 
-    def handle_save_bilty(self, user: sqlite3.Row, job_id: str) -> None:
-        payload = self.read_json()
-        optional_reference_number = payload.get("optionalReferenceNumber", payload.get("biltyNumber", "")).strip()
+    def handle_submit_review(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
         with db_connect() as conn:
-            job = self.require_bilty_actor_job(conn, user, job_id)
-            if not job:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job or job["dispatcher_id"] != user["id"]:
+                self.send_json({"error": "Job not assigned to you"}, HTTPStatus.FORBIDDEN)
                 return
-            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending", "dispatched", "delivered"}:
-                self.send_json({"error": "Bilty can only be added after reviewer approval."}, HTTPStatus.CONFLICT)
+            packing_count = conn.execute("SELECT COUNT(*) FROM packing_breakup WHERE dispatch_job_id = ?", (job_id,)).fetchone()[0]
+            photo_count = conn.execute("SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type IN ('packing','final-packing','product-photo')", (job_id,)).fetchone()[0]
+            goods_count = conn.execute("SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type = 'goods-check'", (job_id,)).fetchone()[0]
+            if not goods_count:
+                self.send_json({"error": "Upload goods photo"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not packing_count:
+                self.send_json({"error": "Enter packing breakup"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not photo_count:
+                self.send_json({"error": "Upload packing photo"}, HTTPStatus.BAD_REQUEST)
+                return
+            order_cases = int(job["total_cases"] or 0)
+            total_packed = int(job["total_packed_cases"] or 0)
+            shortage_items = json_loads(job["shortage_items_json"], [])
+            if total_packed != order_cases and not exception_items_match_delta(shortage_items, total_packed - order_cases):
+                self.send_json({"error": "Packed cases do not match bill cases. Please correct the breakup or enter valid item difference."}, HTTPStatus.BAD_REQUEST)
                 return
             timestamp = now_iso()
             old_status = job["current_status"]
-            conn.execute(
-                """
-                UPDATE bilty_details
-                SET optional_reference_number = ?, updated_at = ?
-                WHERE dispatch_job_id = ?
-                """,
-                (optional_reference_number, timestamp, job_id),
-            )
+            new_status = "submitted-for-review"
             conn.execute(
                 """
                 UPDATE dispatch_jobs
-                SET current_status = 'dispatch-pending', updated_at = ?
+                SET current_status = ?, submitted_for_review_at = ?, correction_resubmitted_at = CASE WHEN current_status = 'needs-correction' THEN ? ELSE correction_resubmitted_at END,
+                    dispatcher_note = COALESCE(NULLIF(?, ''), dispatcher_note), updated_at = ?
                 WHERE id = ?
                 """,
-                (timestamp, job_id),
+                (new_status, timestamp, timestamp, payload.get("dispatcherNote", "").strip(), timestamp, job_id),
             )
-            log_action(conn, job_id, user, "bilty_reference_saved", old_status, "dispatch-pending")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+            log_activity(conn, user, job_id, "submitted_for_review", old_status, new_status, "Submitted for reviewer checking")
+        self.send_json({"job": serialize_job_by_id(job_id)})
 
-    def handle_save_reviewer_dispatch(self, user: sqlite3.Row, job_id: str) -> None:
-        payload = self.read_json()
+    def handle_review_decision(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
+        decision = payload.get("decision")
+        note = payload.get("note", "").strip()
+        if decision in {"send-back", "reject"} and not note:
+            self.send_json({"error": "Please enter rejection reason."}, HTTPStatus.BAD_REQUEST)
+            return
         with db_connect() as conn:
-            job = self.require_job(conn, job_id)
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
             if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
                 return
-            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending", "dispatched", "delivered"}:
-                self.send_json({"error": "Approve packing first"}, HTTPStatus.CONFLICT)
+            final_photo = conn.execute("SELECT COUNT(*) FROM photos WHERE dispatch_job_id = ? AND photo_type IN ('packing','final-packing','product-photo')", (job_id,)).fetchone()[0]
+            if decision == "approve" and not final_photo:
+                self.send_json({"error": "Cannot approve. Required photos are missing."}, HTTPStatus.BAD_REQUEST)
                 return
-            delivery_partner_name = payload.get("deliveryPartnerName", "").strip()
-            transport_mode = payload.get("transportMode", "").strip()
-            transport_name = payload.get("transportName", "").strip()
-            bilty_package_count = payload.get("biltyPackageCount")
-            bilty_package_count = None if bilty_package_count in ("", None) else int(bilty_package_count)
-            optional_reference_number = payload.get("optionalReferenceNumber", "").strip()
-            package_difference_reason = payload.get("packageDifferenceReason", "").strip()
-            package_difference_note = payload.get("packageDifferenceNote", "").strip()
-            bilty_date = payload.get("biltyDate", "")
-            bilty_value = payload.get("biltyValue")
-            freight_amount = payload.get("freightAmount")
-            delivery_route = payload.get("deliveryRoute", "").strip()
-            route_sequence = payload.get("routeSequence")
-            difference = None if bilty_package_count is None else bilty_package_count - int(job["total_packages"] or 0)
+            if decision == "approve":
+                new_status = "dispatch-pending"
+                action = "reviewer_approved"
+                remarks = note or "Packing approved for dispatch"
+                reviewed_at = now_iso()
+                conn.execute(
+                    """
+                    UPDATE dispatch_jobs
+                    SET current_status = ?, reviewer_id = ?, reviewer_note = ?, reviewed_at = ?, reviewer_approved_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_status, user["id"], note, reviewed_at, reviewed_at, reviewed_at, job_id),
+                )
+            elif decision == "send-back":
+                new_status = "needs-correction"
+                action = "correction_sent"
+                remarks = note
+                timestamp = now_iso()
+                conn.execute(
+                    "UPDATE dispatch_jobs SET current_status = ?, reviewer_id = ?, reviewer_note = ?, correction_sent_at = ?, updated_at = ? WHERE id = ?",
+                    (new_status, user["id"], note, timestamp, timestamp, job_id),
+                )
+            elif decision == "reject":
+                new_status = "cancelled"
+                action = "cancelled"
+                remarks = note
+                timestamp = now_iso()
+                conn.execute(
+                    "UPDATE dispatch_jobs SET current_status = ?, reviewer_id = ?, reviewer_note = ?, reviewed_at = ?, updated_at = ? WHERE id = ?",
+                    (new_status, user["id"], note, timestamp, timestamp, job_id),
+                )
+            else:
+                self.send_json({"error": "Invalid reviewer decision"}, HTTPStatus.BAD_REQUEST)
+                return
+            log_activity(conn, user, job_id, action, job["current_status"], new_status, remarks)
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_reviewer_dispatch_update(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
+        delivery_partner = payload.get("deliveryPartnerName", "").strip()
+        transport_mode = payload.get("transportMode", "").strip()
+        transport_name = payload.get("transportName", "").strip()
+        if transport_mode.lower() != "self" and not delivery_partner:
+            self.send_json({"error": "Enter delivery partner name"}, HTTPStatus.BAD_REQUEST)
+            return
+        if not transport_mode:
+            self.send_json({"error": "Select transport mode"}, HTTPStatus.BAD_REQUEST)
+            return
+        if transport_mode == "Transport" and not transport_name:
+            self.send_json({"error": "Select transport name"}, HTTPStatus.BAD_REQUEST)
+            return
+        bilty_count = payload.get("biltyPackageCount")
+        try:
+            bilty_count_int = int(bilty_count) if bilty_count not in (None, "") else None
+        except (TypeError, ValueError):
+            self.send_json({"error": "Enter bilty package count"}, HTTPStatus.BAD_REQUEST)
+            return
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            total_packages = int(job["total_packages"] or 0)
+            diff = (bilty_count_int - total_packages) if bilty_count_int is not None else None
+            if bilty_count_int is not None and diff and not payload.get("packageDifferenceReason"):
+                self.send_json({"error": "Select difference reason"}, HTTPStatus.BAD_REQUEST)
+                return
             timestamp = now_iso()
             conn.execute(
                 """
                 UPDATE dispatch_jobs
                 SET delivery_partner_name = ?, transport_mode = ?, transport_name = ?, delivery_route = ?,
                     route_sequence = ?, package_count_difference = ?, package_difference_reason = ?,
-                    package_difference_note = ?, current_status = CASE WHEN current_status = 'approved-by-reviewer' THEN 'dispatch-pending' ELSE current_status END,
-                    updated_at = ?
+                    package_difference_note = ?, bilty_package_count = ?, optional_reference_number = ?, freight_amount = ?, reviewer_id = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
-                    delivery_partner_name,
+                    delivery_partner,
                     transport_mode,
                     transport_name,
-                    delivery_route,
-                    route_sequence,
-                    difference,
-                    package_difference_reason,
-                    package_difference_note,
-                    timestamp,
-                    job_id,
-                ),
-            )
-            conn.execute(
-                """
-                UPDATE bilty_details
-                SET optional_reference_number = ?, delivery_partner_name = ?, bilty_date = ?,
-                    bilty_package_count = ?, bilty_value = ?, freight_amount = ?, updated_at = ?
-                WHERE dispatch_job_id = ?
-                """,
-                (
-                    optional_reference_number,
-                    delivery_partner_name,
-                    bilty_date,
-                    bilty_package_count,
-                    bilty_value,
-                    freight_amount,
-                    timestamp,
-                    job_id,
-                ),
-            )
-            if delivery_partner_name:
-                conn.execute(
-                    """
-                    INSERT INTO delivery_partners (name, preferred_transport_name, active_status, created_at, updated_at)
-                    VALUES (?, ?, 1, ?, ?)
-                    ON CONFLICT(name) DO UPDATE SET
-                      preferred_transport_name = CASE WHEN excluded.preferred_transport_name != '' THEN excluded.preferred_transport_name ELSE delivery_partners.preferred_transport_name END,
-                      active_status = 1,
-                      updated_at = excluded.updated_at
-                    """,
-                    (delivery_partner_name, transport_name, timestamp, timestamp),
-                )
-            log_action(conn, job_id, user, "dispatch_details_saved", job["current_status"], "dispatch-pending" if job["current_status"] == "approved-by-reviewer" else job["current_status"], metadata=payload)
-            self.send_json(serialize_job_for_user(conn, job_id, user))
-
-    def handle_bilty_photo(self, user: sqlite3.Row, job_id: str) -> None:
-        form = self.parse_multipart()
-        upload = form["file"] if "file" in form else None
-        if upload is None or not getattr(upload, "filename", ""):
-            self.send_json({"error": "Bilty photo is required."}, HTTPStatus.BAD_REQUEST)
-            return
-        with db_connect() as conn:
-            job = self.require_bilty_actor_job(conn, user, job_id)
-            if not job:
-                return
-            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending", "dispatched", "delivered"}:
-                self.send_json({"error": "Bilty can only be added after reviewer approval."}, HTTPStatus.CONFLICT)
-                return
-            suffix = Path(upload.filename).suffix.lower() or ".jpg"
-            saved_name = f"{uuid.uuid4()}{suffix}"
-            saved_path = BILTY_PHOTOS_DIR / saved_name
-            with saved_path.open("wb") as target:
-                shutil.copyfileobj(upload.file, target)
-            timestamp = now_iso()
-            old_status = job["current_status"]
-            conn.execute(
-                """
-                UPDATE bilty_details
-                SET bilty_photo_url = ?, delivery_partner_name = ?, bilty_uploaded_by = ?,
-                    bilty_uploaded_at = ?, updated_at = ?
-                WHERE dispatch_job_id = ?
-                """,
-                (
-                    f"/uploads/bilty-photos/{saved_name}",
-                    job["delivery_partner_name"] or "",
+                    payload.get("deliveryRoute", "").strip(),
+                    payload.get("routeSequence") or None,
+                    diff,
+                    payload.get("packageDifferenceReason", "").strip(),
+                    payload.get("packageDifferenceNote", "").strip(),
+                    bilty_count_int,
+                    payload.get("optionalReferenceNumber", "").strip(),
+                    float(payload.get("freightAmount") or 0) if payload.get("freightAmount") not in (None, "") else None,
                     user["id"],
                     timestamp,
-                    timestamp,
                     job_id,
                 ),
             )
+            log_activity(conn, user, job_id, "reviewer_dispatch_details_saved", job["current_status"], job["current_status"], "Dispatch details saved")
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_bilty_photo(self, job_id: str, user: sqlite3.Row) -> None:
+        form = parse_multipart(self)
+        if not form or "photo" not in form:
+            self.send_json({"error": "Upload bilty photo"}, HTTPStatus.BAD_REQUEST)
+            return
+        photo_item = form["photo"] if not isinstance(form["photo"], list) else form["photo"][0]
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            url = save_upload(photo_item, BILTY_PHOTOS_DIR)
+            timestamp = now_iso()
+            conn.execute("UPDATE dispatch_jobs SET bilty_photo_url = ?, updated_at = ? WHERE id = ?", (url, timestamp, job_id))
+            conn.execute(
+                """
+                INSERT INTO photos (id, dispatch_job_id, photo_type, file_url, uploaded_by, created_at)
+                VALUES (?, ?, 'bilty', ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), job_id, url, user["id"], timestamp),
+            )
+            log_activity(conn, user, job_id, "bilty_photo_uploaded", job["current_status"], job["current_status"], "Bilty photo uploaded", {"photo": url})
+        self.send_json({"job": serialize_job_by_id(job_id), "url": url})
+
+    def handle_update_bilty(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            timestamp = now_iso()
             conn.execute(
                 """
                 UPDATE dispatch_jobs
-                SET bilty_uploaded_at = ?, updated_at = ?
+                SET optional_reference_number = ?, bilty_date = ?, bilty_package_count = ?, bilty_value = ?, freight_amount = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (timestamp, timestamp, job_id),
+                (
+                    payload.get("optionalReferenceNumber", "").strip(),
+                    payload.get("biltyDate", "").strip(),
+                    int(payload.get("biltyPackageCount")) if payload.get("biltyPackageCount") not in (None, "") else None,
+                    float(payload.get("biltyValue")) if payload.get("biltyValue") not in (None, "") else None,
+                    float(payload.get("freightAmount")) if payload.get("freightAmount") not in (None, "") else None,
+                    timestamp,
+                    job_id,
+                ),
             )
-            log_action(
-                conn,
-                job_id,
-                user,
-                "bilty_photo_uploaded",
-                old_status,
-                job["current_status"],
-                metadata={"file_url": f"/uploads/bilty-photos/{saved_name}"},
-            )
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+            log_activity(conn, user, job_id, "bilty_saved", job["current_status"], job["current_status"], "Bilty details saved")
+        self.send_json({"job": serialize_job_by_id(job_id)})
 
-    def handle_mark_dispatched(self, user: sqlite3.Row, job_id: str) -> None:
+    def handle_mark_dispatched(self, job_id: str, user: sqlite3.Row) -> None:
         with db_connect() as conn:
-            job = self.require_bilty_actor_job(conn, user, job_id)
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
             if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
                 return
-            if job["current_status"] not in {"approved-by-reviewer", "dispatch-pending"}:
-                self.send_json({"error": "Only approved jobs can be dispatched."}, HTTPStatus.CONFLICT)
-                return
-            mode = job["transport_mode"] or ""
-            if mode != "Self" and not job["delivery_partner_name"]:
-                self.send_json({"error": "Enter delivery partner name"}, HTTPStatus.BAD_REQUEST)
-                return
-            if not mode:
+            if not job["transport_mode"]:
                 self.send_json({"error": "Select transport mode"}, HTTPStatus.BAD_REQUEST)
                 return
-            if mode == "Transport" and not job["transport_name"]:
+            if str(job["transport_mode"]).lower() != "self" and not job["delivery_partner_name"]:
+                self.send_json({"error": "Enter delivery partner name"}, HTTPStatus.BAD_REQUEST)
+                return
+            if job["transport_mode"] == "Transport" and not job["transport_name"]:
                 self.send_json({"error": "Select transport name"}, HTTPStatus.BAD_REQUEST)
                 return
-            bilty = conn.execute("SELECT freight_amount FROM bilty_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-            freight_amount = bilty["freight_amount"] if bilty else None
-            if mode != "Self" and (freight_amount is None or float(freight_amount) <= 0):
+            if job["transport_mode"] == "Transport" and (job["freight_amount"] in (None, "")):
                 self.send_json({"error": "Enter freight amount"}, HTTPStatus.BAD_REQUEST)
                 return
             timestamp = now_iso()
-            if mode == "Self":
+            conn.execute("UPDATE dispatch_jobs SET current_status = 'dispatched', dispatched_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, job_id))
+            log_activity(conn, user, job_id, "marked_dispatched", job["current_status"], "dispatched", "Sent to dispatch")
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_mark_delivered(self, job_id: str, user: sqlite3.Row) -> None:
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            timestamp = now_iso()
+            conn.execute("UPDATE dispatch_jobs SET current_status = 'delivered', delivered_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, job_id))
+            log_activity(conn, user, job_id, "marked_delivered", job["current_status"], "delivered", "Delivery partner took goods")
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_mark_completed(self, job_id: str, user: sqlite3.Row) -> None:
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if job["transport_mode"] == "Transport" and not job["bilty_photo_url"]:
+                self.send_json({"error": "Upload bilty photo"}, HTTPStatus.BAD_REQUEST)
+                return
+            if job["transport_mode"] == "Transport" and job["bilty_package_count"] is None:
+                self.send_json({"error": "Enter bilty package count"}, HTTPStatus.BAD_REQUEST)
+                return
+            if job["bilty_package_count"] is not None and job["bilty_package_count"] != job["total_packages"] and not job["package_difference_reason"]:
+                self.send_json({"error": "Select difference reason"}, HTTPStatus.BAD_REQUEST)
+                return
+            timestamp = now_iso()
+            conn.execute("UPDATE dispatch_jobs SET current_status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, job_id))
+            log_activity(conn, user, job_id, "marked_completed", job["current_status"], "completed", "Dispatch completed")
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_cancel_dispatch(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
+        reason = payload.get("reason", "").strip() or "Cancelled by reviewer/admin"
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            timestamp = now_iso()
+            conn.execute("UPDATE dispatch_jobs SET current_status = 'cancelled', reviewer_note = ?, updated_at = ? WHERE id = ?", (reason, timestamp, job_id))
+            log_activity(conn, user, job_id, "cancelled", job["current_status"], "cancelled", reason)
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_admin_update(self, job_id: str, user: sqlite3.Row) -> None:
+        payload = read_json_body(self)
+        allowed = {
+            "partyName": "party_name",
+            "partyCity": "party_city",
+            "partyMobileNumber": "party_mobile_number",
+            "place": "place",
+            "orderCaseCount": "total_cases",
+            "invoiceAmount": "total_amount",
+            "currentStatus": "current_status",
+            "deliveryPartnerName": "delivery_partner_name",
+            "transportMode": "transport_mode",
+            "transportName": "transport_name",
+            "deliveryRoute": "delivery_route",
+            "dispatcherId": "dispatcher_id",
+            "reviewerId": "reviewer_id",
+            "adminNote": "admin_note",
+        }
+        updates = []
+        values = []
+        for key, column in allowed.items():
+            if key in payload:
+                updates.append(f"{column} = ?")
+                values.append(payload[key])
+        if not updates:
+            self.send_json({"error": "No editable fields provided"}, HTTPStatus.BAD_REQUEST)
+            return
+        with db_connect() as conn:
+            job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not job:
+                self.send_json({"error": "Job not found"}, HTTPStatus.NOT_FOUND)
+                return
+            values.extend([user["id"], now_iso(), job_id])
+            conn.execute(f"UPDATE dispatch_jobs SET {', '.join(updates)}, admin_override_by = ?, updated_at = ? WHERE id = ?", values)
+            log_activity(conn, user, job_id, "admin_override", job["current_status"], payload.get("currentStatus", job["current_status"]), payload.get("adminNote", "Manual admin edit"), payload)
+        self.send_json({"job": serialize_job_by_id(job_id)})
+
+    def handle_create_user(self) -> None:
+        payload = read_json_body(self)
+        name = payload.get("name", "").strip()
+        login = payload.get("emailOrMobile", "").strip()
+        password = payload.get("password", "").strip() or "dispatch123"
+        role = payload.get("role", "").strip()
+        if not name or not login or role not in {"admin", "reviewer", "dispatcher"}:
+            self.send_json({"error": "Name, login, and valid role required"}, HTTPStatus.BAD_REQUEST)
+            return
+        timestamp = now_iso()
+        with db_connect() as conn:
+            try:
                 conn.execute(
-                    """
-                    UPDATE dispatch_jobs
-                    SET current_status = 'completed', dispatched_at = ?, delivered_at = ?, completed_at = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (timestamp, timestamp, timestamp, timestamp, job_id),
+                    "INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    (str(uuid.uuid4()), name, login, hash_password(password), role, timestamp, timestamp),
                 )
-                log_action(conn, job_id, user, "marked_self_completed", job["current_status"], "completed")
-                self.send_json(serialize_job_for_user(conn, job_id, user))
+            except sqlite3.IntegrityError:
+                self.send_json({"error": "Login already exists"}, HTTPStatus.CONFLICT)
                 return
-            conn.execute(
-                "UPDATE dispatch_jobs SET current_status = 'dispatched', dispatched_at = ?, updated_at = ? WHERE id = ?",
-                (timestamp, timestamp, job_id),
-            )
-            log_action(conn, job_id, user, "marked_dispatched", job["current_status"], "dispatched")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+        self.send_json({"ok": True}, HTTPStatus.CREATED)
 
-    def handle_mark_delivered(self, user: sqlite3.Row, job_id: str) -> None:
+    def handle_update_user(self, user_id: str) -> None:
+        payload = read_json_body(self)
+        fields = []
+        values = []
+        if "name" in payload:
+            fields.append("name = ?")
+            values.append(payload["name"].strip())
+        if "emailOrMobile" in payload:
+            fields.append("email_or_mobile = ?")
+            values.append(payload["emailOrMobile"].strip())
+        if "role" in payload and payload["role"] in {"admin", "reviewer", "dispatcher"}:
+            fields.append("role = ?")
+            values.append(payload["role"])
+        if "activeStatus" in payload:
+            fields.append("active_status = ?")
+            values.append(1 if payload["activeStatus"] else 0)
+        if payload.get("password"):
+            fields.append("password_hash = ?")
+            values.append(hash_password(payload["password"]))
+        if not fields:
+            self.send_json({"error": "No user fields provided"}, HTTPStatus.BAD_REQUEST)
+            return
+        values.extend([now_iso(), user_id])
         with db_connect() as conn:
-            job = self.require_bilty_actor_job(conn, user, job_id)
-            if not job:
-                return
-            if job["current_status"] != "dispatched":
-                self.send_json({"error": "A job must be dispatched before it can be delivered."}, HTTPStatus.CONFLICT)
-                return
-            timestamp = now_iso()
-            conn.execute(
-                "UPDATE dispatch_jobs SET current_status = 'delivered', delivered_at = ?, updated_at = ? WHERE id = ?",
-                (timestamp, timestamp, job_id),
-            )
-            log_action(conn, job_id, user, "marked_delivered", "dispatched", "delivered")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+            conn.execute(f"UPDATE users SET {', '.join(fields)}, updated_at = ? WHERE id = ?", values)
+        self.send_json({"ok": True})
 
-    def handle_mark_completed(self, user: sqlite3.Row, job_id: str) -> None:
+    def handle_create_directory_item(self) -> None:
+        payload = read_json_body(self)
+        kind = payload.get("kind")
+        name = payload.get("name", "").strip()
+        if not name or kind not in {"deliveryPartner", "transport"}:
+            self.send_json({"error": "Name and directory type required"}, HTTPStatus.BAD_REQUEST)
+            return
+        timestamp = now_iso()
         with db_connect() as conn:
-            job = self.require_job(conn, job_id)
-            if not job:
+            try:
+                if kind == "deliveryPartner":
+                    conn.execute(
+                        "INSERT INTO delivery_partners (name, active_status, cost_per_package, cost_per_bora, munshiyana_per_transport, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, ?)",
+                        (name, float(payload.get("costPerPackage") or 10), float(payload.get("costPerBora") or 40), float(payload.get("munshiyanaPerTransport") or 20), timestamp, timestamp),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO transports (name, active_status, default_route, default_delivery_partner, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?)",
+                        (name, payload.get("defaultRoute", ""), payload.get("defaultDeliveryPartner", ""), timestamp, timestamp),
+                    )
+            except sqlite3.IntegrityError:
+                self.send_json({"error": "Name already exists"}, HTTPStatus.CONFLICT)
                 return
-            if job["current_status"] not in {"dispatched", "delivered"}:
-                self.send_json({"error": "Mark sent to transport first"}, HTTPStatus.CONFLICT)
-                return
-            bilty = conn.execute("SELECT * FROM bilty_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-            mode = job["transport_mode"] or ""
-            if mode == "Transport":
-                if not bilty["bilty_photo_url"]:
-                    self.send_json({"error": "Upload bilty photo"}, HTTPStatus.BAD_REQUEST)
-                    return
-                if bilty["bilty_package_count"] is None:
-                    self.send_json({"error": "Enter bilty package count"}, HTTPStatus.BAD_REQUEST)
-                    return
-                if int(bilty["bilty_package_count"]) != int(job["total_packages"] or 0) and not job["package_difference_reason"]:
-                    self.send_json({"error": "Select difference reason"}, HTTPStatus.BAD_REQUEST)
-                    return
-            if mode != "Self" and (bilty["freight_amount"] is None or float(bilty["freight_amount"]) <= 0):
-                self.send_json({"error": "Enter freight amount"}, HTTPStatus.BAD_REQUEST)
-                return
-            timestamp = now_iso()
-            old_status = job["current_status"]
-            conn.execute(
-                "UPDATE dispatch_jobs SET current_status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?",
-                (timestamp, timestamp, job_id),
-            )
-            log_action(conn, job_id, user, "marked_completed", old_status, "completed")
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+        self.send_json({"ok": True}, HTTPStatus.CREATED)
 
-    def handle_admin_override(self, user: sqlite3.Row, job_id: str) -> None:
-        payload = self.read_json()
+    def handle_update_directory_item(self, item_id: str) -> None:
+        payload = read_json_body(self)
+        kind = payload.get("kind")
+        name = payload.get("name", "").strip()
+        timestamp = now_iso()
         with db_connect() as conn:
-            job = self.require_job(conn, job_id)
-            if not job:
-                return
-            admin_note = payload.get("adminNote", "").strip()
-            updates = []
-            params = []
-            if "dispatcherId" in payload:
-                updates.append("dispatcher_id = ?")
-                params.append(payload["dispatcherId"] or None)
-            if "currentStatus" in payload:
-                if payload["currentStatus"] not in STATUSES:
-                    self.send_json({"error": "Invalid status."}, HTTPStatus.BAD_REQUEST)
+            if kind == "deliveryPartner":
+                old = conn.execute("SELECT * FROM delivery_partners WHERE id = ?", (item_id,)).fetchone()
+                if not old:
+                    self.send_json({"error": "Delivery partner not found"}, HTTPStatus.NOT_FOUND)
                     return
-                updates.append("current_status = ?")
-                params.append(payload["currentStatus"])
-            if "partyName" in payload:
-                updates.append("party_name = ?")
-                params.append(payload["partyName"].strip())
-            if "place" in payload:
-                updates.append("place = ?")
-                params.append(payload["place"].strip())
-                updates.append("party_city = ?")
-                params.append(payload["place"].strip())
-            if "invoiceNumber" in payload:
-                updates.append("invoice_number = ?")
-                params.append(payload["invoiceNumber"].strip())
-            if "totalCases" in payload:
-                updates.append("total_cases = ?")
-                params.append(int(payload["totalCases"]))
-            if "adminNote" in payload:
-                updates.append("admin_note = ?")
-                params.append(admin_note)
-            if "transporterDeliveryPartnerName" in payload:
-                updates.append("transporter_delivery_partner_name = ?")
-                params.append(payload["transporterDeliveryPartnerName"].strip())
-            if not updates:
-                self.send_json({"error": "No changes provided."}, HTTPStatus.BAD_REQUEST)
+                old_name = old["name"]
+                cost_per_package = float(payload.get("costPerPackage") or old["cost_per_package"] or 10)
+                cost_per_bora = float(payload.get("costPerBora") or old["cost_per_bora"] or 40)
+                munshiyana = float(payload.get("munshiyanaPerTransport") or old["munshiyana_per_transport"] or 20)
+                conn.execute(
+                    "UPDATE delivery_partners SET name = ?, active_status = ?, cost_per_package = ?, cost_per_bora = ?, munshiyana_per_transport = ?, updated_at = ? WHERE id = ?",
+                    (name or old_name, 1 if payload.get("activeStatus", True) else 0, cost_per_package, cost_per_bora, munshiyana, timestamp, item_id),
+                )
+                if name and name != old_name:
+                    conn.execute("UPDATE dispatch_jobs SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
+                    conn.execute("UPDATE route_batches SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
+            elif kind == "transport":
+                old = conn.execute("SELECT * FROM transports WHERE id = ?", (item_id,)).fetchone()
+                if not old:
+                    self.send_json({"error": "Transport not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                old_name = old["name"]
+                conn.execute(
+                    "UPDATE transports SET name = ?, active_status = ?, default_route = ?, default_delivery_partner = ?, updated_at = ? WHERE id = ?",
+                    (name or old_name, 1 if payload.get("activeStatus", True) else 0, payload.get("defaultRoute", old["default_route"] or ""), payload.get("defaultDeliveryPartner", old["default_delivery_partner"] or ""), timestamp, item_id),
+                )
+                if name and name != old_name:
+                    conn.execute("UPDATE dispatch_jobs SET transport_name = ?, updated_at = ? WHERE transport_name = ?", (name, timestamp, old_name))
+            else:
+                self.send_json({"error": "Invalid directory type"}, HTTPStatus.BAD_REQUEST)
                 return
-            old_status = job["current_status"]
-            new_status = payload.get("currentStatus", old_status)
-            packing = conn.execute("SELECT packing_breakup_json FROM packing_details WHERE dispatch_job_id = ?", (job_id,)).fetchone()
-            totals = packing_totals(load_json(packing["packing_breakup_json"], empty_packing())) if packing else {"totalPackages": 0, "totalPackedCases": 0}
-            updated_order_cases = int(payload.get("totalCases", job["total_cases"] or 0) or 0)
-            mismatch_after_edit = totals["totalPackedCases"] and totals["totalPackedCases"] != updated_order_cases
-            status_changed = new_status != old_status
-            if (mismatch_after_edit or status_changed) and not admin_note:
-                self.send_json({"error": "Manual override requires reason."}, HTTPStatus.BAD_REQUEST)
+        self.send_json({"ok": True})
+
+    def handle_delete_directory_item(self, item_id: str) -> None:
+        payload = read_json_body(self)
+        kind = payload.get("kind")
+        with db_connect() as conn:
+            if kind == "deliveryPartner":
+                conn.execute("DELETE FROM delivery_partners WHERE id = ?", (item_id,))
+            elif kind == "transport":
+                conn.execute("DELETE FROM transports WHERE id = ?", (item_id,))
+            else:
+                self.send_json({"error": "Invalid directory type"}, HTTPStatus.BAD_REQUEST)
                 return
-            updates.extend(["admin_override_by = ?", "updated_at = ?"])
-            params.extend([user["id"], now_iso(), job_id])
-            conn.execute(f"UPDATE dispatch_jobs SET {', '.join(updates)} WHERE id = ?", params)
-            log_action(conn, job_id, user, "admin_override", old_status, new_status, metadata=payload)
-            self.send_json(serialize_job_for_user(conn, job_id, user))
+        self.send_json({"ok": True})
+
+    def handle_update_route(self, route_id: str) -> None:
+        payload = read_json_body(self)
+        name = payload.get("name", "").strip()
+        if not name:
+            self.send_json({"error": "Route name required"}, HTTPStatus.BAD_REQUEST)
+            return
+        with db_connect() as conn:
+            conn.execute("UPDATE route_names SET name = ? WHERE id = ?", (name, route_id))
+        self.send_json({"ok": True})
+
+    def handle_backup_import(self, user: sqlite3.Row) -> None:
+        form = parse_multipart(self)
+        if not form or "backupFile" not in form:
+            self.send_json({"error": "Backup ZIP file is required."}, HTTPStatus.BAD_REQUEST)
+            return
+        file_item = form["backupFile"] if not isinstance(form["backupFile"], list) else form["backupFile"][0]
+        if not getattr(file_item, "filename", None):
+            self.send_json({"error": "Backup ZIP file is required."}, HTTPStatus.BAD_REQUEST)
+            return
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = DATA_DIR / f"pre-import-backup-{timestamp}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        if DB_PATH.exists():
+            shutil.copy2(DB_PATH, backup_dir / "dispatches.db")
+        if UPLOAD_DIR.exists():
+            shutil.copytree(UPLOAD_DIR, backup_dir / "uploads", dirs_exist_ok=True)
+        archive_bytes = file_item.file.read()
+        if len(archive_bytes) > 200 * 1024 * 1024:
+            self.send_json({"error": "Backup file is too large."}, HTTPStatus.BAD_REQUEST)
+            return
+        extract_dir = DATA_DIR / f"import-{timestamp}"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+                for member in archive.infolist():
+                    member_path = (extract_dir / member.filename).resolve()
+                    if not str(member_path).startswith(str(extract_dir.resolve())):
+                        raise ValueError("Invalid backup path")
+                archive.extractall(extract_dir)
+        except (zipfile.BadZipFile, ValueError):
+            self.send_json({"error": "Invalid backup ZIP."}, HTTPStatus.BAD_REQUEST)
+            return
+        source_db = extract_dir / "dispatches.db"
+        if not source_db.exists():
+            matches = list(extract_dir.rglob("dispatches.db"))
+            source_db = matches[0] if matches else source_db
+        if not source_db.exists():
+            self.send_json({"error": "Backup must contain dispatches.db."}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            with sqlite3.connect(source_db) as test_conn:
+                table_names = {row[0] for row in test_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "dispatch_jobs" not in table_names or "users" not in table_names:
+                self.send_json({"error": "Backup database is not a Dispatch Desk database."}, HTTPStatus.BAD_REQUEST)
+                return
+        except sqlite3.DatabaseError:
+            self.send_json({"error": "Backup database is invalid."}, HTTPStatus.BAD_REQUEST)
+            return
+        shutil.copy2(source_db, DB_PATH)
+        source_uploads = extract_dir / "uploads"
+        if not source_uploads.exists():
+            matches = [path for path in extract_dir.rglob("uploads") if path.is_dir()]
+            source_uploads = matches[0] if matches else source_uploads
+        if source_uploads.exists():
+            for item in source_uploads.rglob("*"):
+                if not item.is_file():
+                    continue
+                rel = upload_member_relative_path(str(item.relative_to(source_uploads.parent))) or item.relative_to(source_uploads)
+                target = UPLOAD_DIR / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, target)
+        ensure_storage()
+        with db_connect() as conn:
+            log_activity(conn, user, None, "backup_imported", None, None, "Backup imported", {"preImportBackup": str(backup_dir)})
+        self.send_json({"ok": True, "message": "Backup imported", "preImportBackup": str(backup_dir)})
+
+    def handle_bill_export(self, parsed) -> None:
+        params = parse_qs(parsed.query)
+        date_filter = params.get("date", [""])[0]
+        with db_connect() as conn:
+            if date_filter:
+                rows = conn.execute("SELECT * FROM dispatch_jobs WHERE dispatch_date = ? ORDER BY daily_entry_no", (date_filter,)).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM dispatch_jobs ORDER BY dispatch_date DESC, daily_entry_no DESC").fetchall()
+            jobs = [serialize_job(row, conn) for row in rows]
+            log_rows = [dict(item) for item in conn.execute("SELECT * FROM activity_logs ORDER BY created_at DESC")]
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("dispatch_jobs.json", json.dumps(jobs, ensure_ascii=False, indent=2))
+            archive.writestr("activity_logs.json", json.dumps(log_rows, ensure_ascii=False, indent=2))
+            csv_lines = [
+                "dispatch_date,daily_entry_no,party_name,city,status,total_cases,total_packages,total_packed_cases,delivery_partner,transport,route",
+            ]
+            for job in jobs:
+                csv_lines.append(
+                    ",".join(
+                        str(value).replace(",", " ")
+                        for value in [
+                            job.get("dispatchDate"),
+                            job.get("dailyEntryNo"),
+                            job.get("partyName"),
+                            job.get("partyCity"),
+                            job.get("currentStatus"),
+                            job.get("orderCaseCount"),
+                            job.get("totalPackages"),
+                            job.get("totalPackedCases"),
+                            job.get("deliveryPartnerName"),
+                            job.get("transportName"),
+                            job.get("deliveryRoute"),
+                        ]
+                    )
+                )
+            archive.writestr("dispatch_jobs.csv", "\n".join(csv_lines))
+            if DB_PATH.exists():
+                archive.write(DB_PATH, "dispatches.db")
+            if UPLOAD_DIR.exists():
+                for path in UPLOAD_DIR.rglob("*"):
+                    if path.is_file():
+                        archive.write(path, f"uploads/{path.relative_to(UPLOAD_DIR)}")
+        data = buffer.getvalue()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition", "attachment; filename=daily-dispatch-backup.zip")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def handle_create_route_batch(self, user: sqlite3.Row) -> None:
-        payload = self.read_json()
+        payload = read_json_body(self)
         route_name = payload.get("routeName", "").strip()
         job_ids = payload.get("jobIds", [])
         if not route_name or not job_ids:
             self.send_json({"error": "Route name and jobs are required."}, HTTPStatus.BAD_REQUEST)
             return
+        batch_id = str(uuid.uuid4())
+        timestamp = now_iso()
         with db_connect() as conn:
-            batch_id = str(uuid.uuid4())
-            timestamp = now_iso()
             conn.execute(
                 """
                 INSERT INTO route_batches (id, route_name, delivery_partner_name, status, created_by, created_at, updated_at)
@@ -2739,391 +2274,78 @@ class DispatchHandler(BaseHTTPRequestHandler):
                     """,
                     (batch_id, route_name, sequence, payload.get("deliveryPartnerName", "").strip(), timestamp, job_id),
                 )
-            self.send_json({"id": batch_id, "routeName": route_name}, HTTPStatus.CREATED)
-
-    def handle_create_delivery_partner(self) -> None:
-        payload = self.read_json()
-        name = payload.get("name", "").strip()
-        preferred_transport_name = payload.get("preferredTransportName", payload.get("preferred_transport_name", "")).strip()
-        if not name:
-            self.send_json({"error": "Delivery partner name is required."}, HTTPStatus.BAD_REQUEST)
-            return
-        timestamp = now_iso()
-        with db_connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO delivery_partners (name, preferred_transport_name, active_status, created_at, updated_at)
-                VALUES (?, ?, 1, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
-                  preferred_transport_name = CASE
-                    WHEN excluded.preferred_transport_name != '' THEN excluded.preferred_transport_name
-                    ELSE delivery_partners.preferred_transport_name
-                  END,
-                  active_status = 1,
-                  updated_at = excluded.updated_at
-                """,
-                (name, preferred_transport_name, timestamp, timestamp),
-            )
-            row = conn.execute(
-                "SELECT id, name, preferred_transport_name, active_status FROM delivery_partners WHERE name = ?",
-                (name,),
-            ).fetchone()
-            self.send_json(
-                {
-                    "ok": True,
-                    "id": row["id"],
-                    "name": row["name"],
-                    "preferred_transport_name": row["preferred_transport_name"] or "",
-                    "preferredTransportName": row["preferred_transport_name"] or "",
-                    "active_status": bool(row["active_status"]),
-                },
-                HTTPStatus.CREATED,
-            )
-
-    def handle_update_delivery_partner(self, partner_id: int) -> None:
-        payload = self.read_json()
-        name = payload.get("name", "").strip()
-        preferred_transport_name = payload.get("preferredTransportName", payload.get("preferred_transport_name", "")).strip()
-        active_status = 1 if payload.get("activeStatus", True) else 0
-        if not name:
-            self.send_json({"error": "Delivery partner name is required."}, HTTPStatus.BAD_REQUEST)
-            return
-        timestamp = now_iso()
-        with db_connect() as conn:
-            current = conn.execute("SELECT * FROM delivery_partners WHERE id = ?", (partner_id,)).fetchone()
-            if not current:
-                self.send_json({"error": "Delivery partner not found."}, HTTPStatus.NOT_FOUND)
-                return
-            existing = conn.execute("SELECT id FROM delivery_partners WHERE lower(name) = lower(?) AND id != ?", (name, partner_id)).fetchone()
-            if existing:
-                self.send_json({"error": "Delivery partner name already exists."}, HTTPStatus.CONFLICT)
-                return
-            old_name = current["name"]
-            conn.execute(
-                """
-                UPDATE delivery_partners
-                SET name = ?, preferred_transport_name = ?, active_status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (name, preferred_transport_name, active_status, timestamp, partner_id),
-            )
-            if old_name != name:
-                conn.execute("UPDATE dispatch_jobs SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
-                conn.execute("UPDATE bilty_details SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
-                conn.execute("UPDATE route_batches SET delivery_partner_name = ?, updated_at = ? WHERE delivery_partner_name = ?", (name, timestamp, old_name))
-            self.send_json({
-                "id": partner_id,
-                "name": name,
-                "preferred_transport_name": preferred_transport_name,
-                "active_status": active_status,
-            })
-
-    def handle_create_user(self) -> None:
-        payload = self.read_json()
-        name = payload.get("name", "").strip()
-        login = payload.get("login", "").strip()
-        password = payload.get("password", "")
-        role = payload.get("role", "")
-        if not name or not login or not password:
-            self.send_json({"error": "Name, login, and password are required."}, HTTPStatus.BAD_REQUEST)
-            return
-        if role not in {"reviewer", "dispatcher", "admin"}:
-            self.send_json({"error": "Invalid role."}, HTTPStatus.BAD_REQUEST)
-            return
-        timestamp = now_iso()
-        with db_connect() as conn:
-            existing = conn.execute("SELECT id FROM users WHERE email_or_mobile = ?", (login,)).fetchone()
-            if existing:
-                self.send_json({"error": "Login already exists."}, HTTPStatus.CONFLICT)
-                return
-            user_id = str(uuid.uuid4())
-            conn.execute(
-                """
-                INSERT INTO users (id, name, email_or_mobile, password_hash, role, active_status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                """,
-                (user_id, name, login, hash_password(password), role, timestamp, timestamp),
-            )
-            user = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            self.send_json(serialize_user(user), HTTPStatus.CREATED)
-
-    def handle_backup_import(self, user: sqlite3.Row) -> None:
-        form = self.parse_multipart()
-        upload = form["file"] if "file" in form else None
-        if upload is None or not getattr(upload, "filename", ""):
-            self.send_json({"error": "Backup ZIP file is required."}, HTTPStatus.BAD_REQUEST)
-            return
-
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        backup_dir = DATA_DIR / f"pre-import-backup-{timestamp}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        if DB_PATH.exists():
-            shutil.copy2(DB_PATH, backup_dir / "dispatches.db")
-        if UPLOAD_DIR.exists():
-            shutil.copytree(UPLOAD_DIR, backup_dir / "uploads", dirs_exist_ok=True)
-
-        with tempfile.TemporaryDirectory() as temp_name:
-            temp_dir = Path(temp_name)
-            zip_path = temp_dir / "import.zip"
-            with zip_path.open("wb") as target:
-                shutil.copyfileobj(upload.file, target)
-
-            try:
-                with zipfile.ZipFile(zip_path) as archive:
-                    members = archive.infolist()
-                    for member in members:
-                        member_path = Path(member.filename)
-                        if member_path.is_absolute() or ".." in member_path.parts:
-                            self.send_json({"error": "Invalid backup ZIP."}, HTTPStatus.BAD_REQUEST)
-                            return
-                    archive.extractall(temp_dir / "extracted")
-            except zipfile.BadZipFile:
-                self.send_json({"error": "Invalid backup ZIP."}, HTTPStatus.BAD_REQUEST)
-                return
-
-            extracted = temp_dir / "extracted"
-            source_db = extracted / "dispatches.db"
-            source_uploads = extracted / "uploads"
-            if not source_db.exists():
-                self.send_json({"error": "Backup must contain dispatches.db."}, HTTPStatus.BAD_REQUEST)
-                return
-
-            with sqlite3.connect(source_db) as check_conn:
-                tables = {row[0] for row in check_conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-                if "dispatch_jobs" not in tables or "users" not in tables:
-                    self.send_json({"error": "Backup database is not a Dispatch Desk database."}, HTTPStatus.BAD_REQUEST)
-                    return
-
-            shutil.copy2(source_db, DB_PATH)
-            shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
-            UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            copied_files = 0
-            copied_examples: list[str] = []
-            if source_uploads.exists():
-                for source_file in source_uploads.rglob("*"):
-                    if not source_file.is_file():
-                        continue
-                    relative = source_file.relative_to(source_uploads)
-                    target = UPLOAD_DIR / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source_file, target)
-                    copied_files += 1
-                    if len(copied_examples) < 5:
-                        copied_examples.append(str(relative).replace("\\", "/"))
-            if copied_files == 0:
-                with zipfile.ZipFile(zip_path) as archive:
-                    for member in archive.infolist():
-                        if member.is_dir():
-                            continue
-                        relative = upload_member_relative_path(member.filename)
-                        if relative is None:
-                            continue
-                        target = UPLOAD_DIR / relative
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        with archive.open(member) as source, target.open("wb") as destination:
-                            shutil.copyfileobj(source, destination)
-                        copied_files += 1
-                        if len(copied_examples) < 5:
-                            copied_examples.append(str(relative).replace("\\", "/"))
-
-        ensure_storage()
-        with db_connect() as conn:
-            log_action(
-                conn,
-                None,
-                user,
-                "backup_imported",
-                None,
-                None,
-                remarks=f"Imported cloud migration backup. Previous data backed up at {backup_dir.name}.",
-            )
-            job_count = conn.execute("SELECT COUNT(*) FROM dispatch_jobs").fetchone()[0]
-            photo_count = conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
-        file_count = sum(1 for item in UPLOAD_DIR.rglob("*") if item.is_file()) if UPLOAD_DIR.exists() else 0
-        self.send_json({
-            "ok": True,
-            "jobs": job_count,
-            "photos": photo_count,
-            "files": file_count,
-            "copiedFiles": copied_files,
-            "copiedExamples": copied_examples,
-            "backupFolder": backup_dir.name,
-        })
-
-    def handle_update_settings(self) -> None:
-        payload = self.read_json()
-        updates = {
-            "dispatcher_label": payload.get("dispatcherLabel", "").strip() or "Dispatcher",
-            "reviewer_label": payload.get("reviewerLabel", "").strip() or "Reviewer",
-        }
-        with db_connect() as conn:
-            for key, value in updates.items():
-                conn.execute(
-                    "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (key, value),
-                )
-        self.send_json({"ok": True, **updates})
-
-    def handle_update_route(self, route_id: str) -> None:
-        payload = self.read_json()
-        name = payload.get("name", "").strip()
-        if not name:
-            self.send_json({"error": "Route name is required."}, HTTPStatus.BAD_REQUEST)
-            return
-        with db_connect() as conn:
-            conn.execute("UPDATE route_names SET name = ? WHERE id = ?", (name, route_id))
-            self.send_json({"id": int(route_id), "name": name})
-
-    def handle_update_user(self, user_id: str) -> None:
-        payload = self.read_json()
-        with db_connect() as conn:
-            current = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-            if not current:
-                self.send_json({"error": "User not found."}, HTTPStatus.NOT_FOUND)
-                return
-            name = payload.get("name", current["name"]).strip()
-            login = payload.get("login", current["email_or_mobile"]).strip()
-            password = payload.get("password", "")
-            role = payload.get("role", current["role"])
-            active_status = 1 if payload.get("activeStatus", bool(current["active_status"])) else 0
-            if not name or not login:
-                self.send_json({"error": "Name and login are required."}, HTTPStatus.BAD_REQUEST)
-                return
-            if role not in {"reviewer", "dispatcher", "admin"}:
-                self.send_json({"error": "Invalid role."}, HTTPStatus.BAD_REQUEST)
-                return
-            duplicate = conn.execute(
-                "SELECT id FROM users WHERE email_or_mobile = ? AND id != ?",
-                (login, user_id),
-            ).fetchone()
-            if duplicate:
-                self.send_json({"error": "Login already exists."}, HTTPStatus.CONFLICT)
-                return
-            updates = ["name = ?", "email_or_mobile = ?", "role = ?", "active_status = ?", "updated_at = ?"]
-            params = [name, login, role, active_status, now_iso()]
-            if password:
-                updates.insert(4, "password_hash = ?")
-                params.insert(4, hash_password(password))
-            params.append(user_id)
-            conn.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
-            self.send_json(serialize_user(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()))
-
-    def handle_bill_export(self, parsed) -> None:
-        query = parse_qs(parsed.query)
-        date = query.get("date", [""])[0]
-        with db_connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT invoice_number, party_name, place, bill_file_url
-                FROM dispatch_jobs
-                WHERE bill_file_url IS NOT NULL AND bill_file_url != ''
-                AND (? = '' OR substr(created_at, 1, 10) = ?)
-                """,
-                (date, date),
-            ).fetchall()
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            for row in rows:
-                bill_path = upload_url_to_path(row["bill_file_url"])
-                if not bill_path.exists():
-                    continue
-                safe_party = re.sub(r"[^A-Za-z0-9_-]+", "_", row["party_name"]).strip("_")
-                safe_place = re.sub(r"[^A-Za-z0-9_-]+", "_", row["place"]).strip("_")
-                invoice = re.sub(r"[^A-Za-z0-9_-]+", "_", row["invoice_number"] or "invoice").strip("_")
-                archive.write(bill_path, f"{safe_party or 'party'}_{safe_place or 'place'}_{invoice or 'invoice'}{bill_path.suffix}")
-        data = buffer.getvalue()
-        filename = f"dispatch-bills-{date or 'all'}.zip"
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "application/zip")
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def require_user(self) -> sqlite3.Row | None:
-        user = session_user(self)
-        if not user:
-            self.send_json({"error": "Authentication required."}, HTTPStatus.UNAUTHORIZED)
-            return None
-        if not user["active_status"]:
-            self.send_json({"error": "User is inactive."}, HTTPStatus.FORBIDDEN)
-            return None
-        return user
-
-    def require_roles(self, user: sqlite3.Row, roles: set[str]) -> bool:
-        if user["role"] not in roles:
-            self.send_json({"error": "You do not have permission for this action."}, HTTPStatus.FORBIDDEN)
-            return False
-        return True
-
-    def require_job(self, conn: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
-        job = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
-        if not job:
-            self.send_json({"error": "Dispatch not found."}, HTTPStatus.NOT_FOUND)
-            return None
-        return job
-
-    def require_owned_dispatcher_job(self, conn: sqlite3.Connection, user: sqlite3.Row, job_id: str) -> sqlite3.Row | None:
-        job = self.require_job(conn, job_id)
-        if not job:
-            return None
-        if job["dispatcher_id"] != user["id"]:
-            self.send_json({"error": "You can only work on your own assigned jobs."}, HTTPStatus.FORBIDDEN)
-            return None
-        return job
-
-    def require_bilty_actor_job(self, conn: sqlite3.Connection, user: sqlite3.Row, job_id: str) -> sqlite3.Row | None:
-        job = self.require_job(conn, job_id)
-        if not job:
-            return None
-        if user["role"] == "dispatcher" and job["dispatcher_id"] != user["id"]:
-            self.send_json({"error": "You can only update bilty for your own jobs."}, HTTPStatus.FORBIDDEN)
-            return None
-        return job
-
-    def parse_multipart(self):
-        ctype, pdict = cgi.parse_header(self.headers.get("Content-Type", ""))
-        if ctype != "multipart/form-data":
-            return {}
-        pdict["boundary"] = bytes(pdict["boundary"], "utf-8")
-        return cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers["Content-Type"]},
-        )
-
-    def read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
-        return json.loads(raw.decode("utf-8"))
+            log_activity(conn, user, None, "route_batch_created", None, None, f"Route batch created for {route_name}", {"jobIds": job_ids})
+        self.send_json({"id": batch_id, "routeName": route_name}, HTTPStatus.CREATED)
 
     def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(payload).encode("utf-8")
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def serve_file(self, file_path: Path) -> None:
-        if not file_path.exists() or not file_path.is_file():
+    def serve_file(self, path: Path) -> None:
+        if not path.exists() or not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        data = file_path.read_bytes()
-        mime_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        data = path.read_bytes()
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
 
+def conn_duplicate_invoice(invoice_number: str) -> str | None:
+    with db_connect() as conn:
+        row = conn.execute("SELECT id FROM dispatch_jobs WHERE invoice_number = ?", (invoice_number,)).fetchone()
+    return row["id"] if row else None
+
+
+def next_daily_entry(dispatch_date: str) -> int:
+    with db_connect() as conn:
+        row = conn.execute("SELECT MAX(daily_entry_no) as max_no FROM dispatch_jobs WHERE dispatch_date = ?", (dispatch_date,)).fetchone()
+    return int(row["max_no"] or 0) + 1
+
+
+def serialize_job_by_id(job_id: str) -> dict:
+    with db_connect() as conn:
+        row = conn.execute("SELECT * FROM dispatch_jobs WHERE id = ?", (job_id,)).fetchone()
+        return serialize_job(row, conn)
+
+
+def normalize_packing_lines(raw_lines) -> list[dict]:
+    lines = []
+    if not isinstance(raw_lines, list):
+        return lines
+    for line in raw_lines:
+        if not isinstance(line, dict):
+            continue
+        package_type = str(line.get("packageType") or line.get("packingType") or "Other").strip() or "Other"
+        try:
+            package_count = int(float(line.get("packageCount", line.get("noOfPackages", 0)) or 0))
+            cases_per_package = int(float(line.get("casesPerPackage", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+        total_cases = package_count * cases_per_package
+        if package_count <= 0 or cases_per_package <= 0:
+            continue
+        lines.append({
+            "packageType": package_type,
+            "packageCount": package_count,
+            "casesPerPackage": cases_per_package,
+            "totalCases": total_cases,
+        })
+    return lines
+
+
 def main() -> None:
     ensure_storage()
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), DispatchHandler)
-    print(f"Dispatch Desk running at http://127.0.0.1:{PORT}")
+    port = int(os.environ.get("PORT", "8000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), DispatchHandler)
+    print(f"Daily Dispatch Desk running on http://0.0.0.0:{port}")
     server.serve_forever()
 
 
